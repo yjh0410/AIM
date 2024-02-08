@@ -34,8 +34,8 @@ def build_aim_cls(args):
         # collect AIM's encoder weight
         encoder_state_dict = {}
         for k in list(checkpoint_state_dict.keys()):
-            if 'aim_encoder' in k and k[12:] in model_state_dict.keys():
-                encoder_state_dict[k[12:]] = checkpoint_state_dict[k]
+            if 'encoder' in k and k in model_state_dict.keys():
+                encoder_state_dict[k] = checkpoint_state_dict[k]
 
         # load encoder weight into ViT's encoder
         model.load_state_dict(encoder_state_dict, strict=False)

@@ -145,8 +145,8 @@ class AIM(nn.Module):
         self.num_blocks = num_blocks
         self.norm_pix_loss = norm_pix_loss
         # -------- network parameters --------
-        self.aim_encoder = AIM_Encoder(img_size, patch_size, img_dim, emb_dim, num_layers, num_heads, qkv_bias, mlp_ratio, dropout, prefix_causal_mask)
-        self.aim_decoder = AIM_Decoder(emb_dim, patch_size**2 * img_dim, mlp_ratio, num_blocks, dropout)
+        self.encoder = AIM_Encoder(img_size, patch_size, img_dim, emb_dim, num_layers, num_heads, qkv_bias, mlp_ratio, dropout, prefix_causal_mask)
+        self.decoder = AIM_Decoder(emb_dim, patch_size**2 * img_dim, mlp_ratio, num_blocks, dropout)
 
     def patchify(self, imgs, patch_size):
         """
@@ -204,8 +204,8 @@ class AIM(nn.Module):
         """
         # ---------- infer & loss ----------
         imgs = x
-        x = self.aim_encoder(x, prefix_mask)
-        x = self.aim_decoder(x)
+        x = self.encoder(x, prefix_mask)
+        x = self.decoder(x)
         output = {
             'x_pred': x,
         }
