@@ -41,8 +41,6 @@ def parse_args():
                         help='3 for RGB; 1 for Gray.')    
     parser.add_argument('--patch_size', type=int, default=16,
                         help='patch_size.')    
-    parser.add_argument('--color_format', type=str, default='rgb',
-                        help='color format: rgb or bgr')    
     # Basic
     parser.add_argument('--seed', type=int, default=42,
                         help='random seed.')
@@ -191,7 +189,7 @@ def main():
     if local_rank <= 0:
         model_copy = deepcopy(model)
         model_copy.eval()
-        FLOPs_and_Params(model=model_copy, size=args.img_size)
+        FLOPs_and_Params(model=model_copy, img_size=args.img_size, patch_size=args.patch_size)
         model_copy.train()
         del model_copy
     if args.distributed:

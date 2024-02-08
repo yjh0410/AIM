@@ -1,4 +1,5 @@
 import math
+import random
 import torch
 import torch.nn as nn
 
@@ -57,7 +58,7 @@ class AIM_Encoder(nn.Module):
                 nn.init.constant_(m.weight, 1.0)
 
     def get_posembed(self, embed_dim, grid_size, temperature=10000):
-        scale = 2 * math.pi
+        scale = 2 * torch.pi
         grid_h, grid_w = grid_size, grid_size
         num_pos_feats = embed_dim // 2
         # get grid
@@ -178,34 +179,35 @@ class AIM(nn.Module):
         return imgs
 
     def compute_loss(self, x, output):
-        """
-        imgs: [B, 3, H, W]
-        pred: [B, N, C], C = p*p*3
-        mask: [B, N], 0 is keep, 1 is remove, 
-        """
+        # Patchify the image
         target = self.patchify(x, self.patch_size)
+        bs, seq_length = x.shape[:2]
         if self.norm_pix_loss:
             mean = target.mean(dim=-1, keepdim=True)
             var = target.var(dim=-1, keepdim=True)
             target = (target - mean) / (var + 1.e-6)**.5
 
-        # TODO: compute next patch prediction loss
-        loss = None
+        # Shift one position to the left
+        target = target[:, 1:, :]
+        pred = output["x_pred"]
+
+        # Compute L1 loss
+        loss = (pred[:, :-1, :] - target) ** 2
+        loss = loss.mean(dim=-1).sum() / (seq_length - 1) / bs
         
         return loss
 
-    def forward(self, x, mask):
+    def forward(self, x, prefix_mask=None):
         """
         Inputs:
             x: (torch.Tensor) -> [B, C, H, W]. Input image.
-            mask:  (torch.Tensor) -> [B, N]. prefix mask, where 0 is the retained patch and 1 is the masked patch.
         """
+        # ---------- infer & loss ----------
         imgs = x
-        x = self.aim_encoder(x, mask)
+        x = self.aim_encoder(x, prefix_mask)
         x = self.aim_decoder(x)
         output = {
             'x_pred': x,
-            'mask': mask
         }
 
         if self.is_train:
@@ -421,26 +423,38 @@ if __name__ == '__main__':
     print('===============  AIM pipeline  ===============')
     # parameters
     is_train = True
+    batch_size = 4
     img_size = 224
     patch_size = 16
     num_patches = (img_size // patch_size) ** 2
 
     # generate input data
-    x = torch.randn(2, 3, img_size, img_size)
-    mask = torch.ones(2, num_patches, dtype=torch.int)
-    mask[:, :20] = 0
+    images = []
+    prefix_masks = []
+    for i in range(batch_size):
+        x = torch.randn(3, img_size, img_size).float()
+        prefix_length = random.randint(1, num_patches-1)
+        prefix_mask = torch.zeros(num_patches).bool()
+        prefix_mask[:prefix_length] = True
+        images.append(x)
+        prefix_masks.append(prefix_mask)
+
+    images = torch.stack(images)
+    prefix_masks = torch.stack(prefix_masks)
+
+    # build model
     model = aim_tiny(img_size, patch_size, 3, is_train, norm_pix_loss=False)
 
     # inference
-    outputs = model(x, mask)
+    outputs = model(images, prefix_masks)
     if "loss" in outputs and outputs["loss"]:
         print("Loss: ", outputs["loss"].item())
 
     # compute FLOPs & Params
     print('==============================')
-    x = torch.randn(1, 3, img_size, img_size)
-    mask = torch.zeros(1, num_patches, dtype=torch.int)
-    flops, params = profile(model, inputs=(x, mask), verbose=False)
+    x = images[:1]
+    prefix_mask = prefix_masks[:1]
+    flops, params = profile(model, inputs=(x, prefix_mask), verbose=False)
     print('GFLOPs : {:.2f}'.format(flops / 1e9 * 2))
     print('Params : {:.2f} M'.format(params / 1e6))
 
@@ -462,7 +476,6 @@ if __name__ == '__main__':
     # compute FLOPs & Params
     print('==============================')
     x = torch.randn(1, 3, img_size, img_size)
-    mask = torch.zeros(1, num_patches, dtype=torch.int)
     flops, params = profile(model, inputs=(x,), verbose=False)
     print('GFLOPs : {:.2f}'.format(flops / 1e9 * 2))
     print('Params : {:.2f} M'.format(params / 1e6))

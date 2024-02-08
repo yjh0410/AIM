@@ -6,6 +6,7 @@ import torch
 from utils.misc import MetricLogger, SmoothedValue
 from utils.misc import print_rank_0, all_reduce_mean
 
+
 def train_one_epoch(args,
                     device,
                     model,
@@ -24,9 +25,9 @@ def train_one_epoch(args,
     epoch_size = len(data_loader)
 
     # train one epoch
-    for iter_i, (images, _) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+    for iter_i, (images, _, prefix_masks) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         ni = iter_i + epoch * epoch_size
-        nw = args.wp_epoch * epoch_size
+        nw = 10#args.wp_epoch * epoch_size
         # Warmup
         if ni <= nw:
             xi = [0, nw]  # x interp
@@ -35,11 +36,12 @@ def train_one_epoch(args,
 
         # To device
         images = images.to(device, non_blocking=True)
+        prefix_masks = prefix_masks.to(device, non_blocking=True)
 
         # Inference
         with torch.cuda.amp.autocast():
             ## forward
-            output = model(images)
+            output = model(images, prefix_masks)
             loss = output["loss"]
 
         # Check loss

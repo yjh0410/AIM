@@ -58,12 +58,12 @@ class Attention(nn.Module):
             )
 
 
-    def forward(self, x, mask=None):
+    def forward(self, x, prefix_mask=None):
         B, N, C = x.shape
         # ----------------- Prefix mask -----------------
         if self.prefix_causal_mask:
-            assert mask is not None, "A mask is required for the PrefixLM Causal Attention."
-            prefix_mask = (~mask).unsqueeze(1).expand(-1, N, -1).bool()
+            assert prefix_mask is not None, "A mask is required for the PrefixLM Causal Attention."
+            prefix_mask = prefix_mask.unsqueeze(1).expand(-1, N, -1).bool()
             attn_mask = self.attn_mask.clone().expand(B, -1, -1)
             attn_mask = torch.logical_or(attn_mask, prefix_mask)
             attn_mask = attn_mask.unsqueeze(1)  # (B, 1, N, N)
