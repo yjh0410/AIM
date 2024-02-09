@@ -15,8 +15,8 @@ if [[ $MODEL == *"aim"* ]]; then
     MIN_LR=0
     WEIGHT_DECAY=0.05
     # Epoch
-    MAX_EPOCH=400
-    WP_EPOCH=20
+    MAX_EPOCH=800
+    WP_EPOCH=40
     EVAL_EPOCH=20
 else
     echo "Unknown model!!"
