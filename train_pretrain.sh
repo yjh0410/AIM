@@ -64,8 +64,7 @@ if [ $WORLD_SIZE == 1 ]; then
             --optimizer ${OPTIMIZER} \
             --base_lr ${BASE_LR} \
             --min_lr ${MIN_LR} \
-            --weight_decay ${WEIGHT_DECAY} \
-            --mask_ratio ${MASK_RATIO}
+            --weight_decay ${WEIGHT_DECAY}
 elif [[ $WORLD_SIZE -gt 1 && $WORLD_SIZE -le 8 ]]; then
     python -m torch.distributed.run --nproc_per_node=${WORLD_SIZE} --master_port 1700 main_pretrain.py \
             --cuda \
@@ -83,8 +82,7 @@ elif [[ $WORLD_SIZE -gt 1 && $WORLD_SIZE -le 8 ]]; then
             --optimizer ${OPTIMIZER} \
             --base_lr ${BASE_LR} \
             --min_lr ${MIN_LR} \
-            --weight_decay ${WEIGHT_DECAY} \
-            --mask_ratio ${MASK_RATIO}
+            --weight_decay ${WEIGHT_DECAY}
 else
     echo "The WORLD_SIZE is set to a value greater than 8, indicating the use of multi-machine \
           multi-card training mode, which is currently unsupported."
