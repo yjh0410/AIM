@@ -27,7 +27,7 @@ def train_one_epoch(args,
     # train one epoch
     for iter_i, (images, _, prefix_masks) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         ni = iter_i + epoch * epoch_size
-        nw = 10#args.wp_epoch * epoch_size
+        nw = args.wp_epoch * epoch_size
         # Warmup
         if ni <= nw:
             xi = [0, nw]  # x interp
