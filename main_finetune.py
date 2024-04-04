@@ -26,8 +26,9 @@ from models import build_model
 from utils import lr_decay
 from utils import distributed_utils
 from utils.misc import setup_seed, print_rank_0, load_model, save_model
-from utils.com_flops_params import FLOPs_and_Params
 from utils.misc import NativeScalerWithGradNormCount as NativeScaler
+from utils.lr_scheduler import build_lr_scheduler, LinearWarmUpLrScheduler
+from utils.com_flops_params import FLOPs_and_Params
 
 # ---------------- Training engine ----------------
 from engine_finetune import train_one_epoch, evaluate
@@ -91,6 +92,8 @@ def parse_args():
     # Optimizer
     parser.add_argument('-opt', '--optimizer', type=str, default='adamw',
                         help='sgd, adam')
+    parser.add_argument('-lrs', '--lr_scheduler', type=str, default='cosine',
+                        help='step, cosine')
     parser.add_argument('-wd', '--weight_decay', type=float, default=0.05,
                         help='weight decay')
     parser.add_argument('--base_lr', type=float, default=1e-3,
@@ -176,7 +179,6 @@ def main():
     print("LOCAL RANK: ", local_rank)
     print("LOCAL_PROCESS_RANL: ", local_process_rank)
 
-
     # ------------------------- Build CUDA -------------------------
     if args.cuda:
         if torch.cuda.is_available():
@@ -189,7 +191,6 @@ def main():
     else:
         device = torch.device("cpu")
 
-
     # ------------------------- Build Tensorboard -------------------------
     tblogger = None
     if local_rank <= 0 and args.tfboard:
@@ -200,20 +201,16 @@ def main():
         os.makedirs(log_path, exist_ok=True)
         tblogger = SummaryWriter(log_path)
 
-
     # ------------------------- Build Dataset -------------------------
     train_dataset = build_dataset(args, is_train=True)
     val_dataset   = build_dataset(args, is_train=False)
 
-
     # ------------------------- Build Dataloader -------------------------
     train_dataloader = build_dataloader(args, train_dataset, is_train=True)
     val_dataloader   = build_dataloader(args, val_dataset,   is_train=False)
-
     print('=================== Dataset Information ===================')
     print('Train dataset size : ', len(train_dataset))
     print('Val dataset size   : ', len(val_dataset))
-
 
     # ------------------------- Mixup augmentation config -------------------------
     mixup_fn = None
@@ -229,21 +226,19 @@ def main():
                          label_smoothing = args.smoothing,
                          num_classes     = args.num_classes)
 
-
     # ------------------------- Build Model -------------------------
-    model = build_model(args)
+    model = build_model(args, model_type="cls")
     model.train().to(device)
     print(model)
     if local_rank <= 0:
         model_copy = deepcopy(model)
         model_copy.eval()
-        FLOPs_and_Params(model=model_copy, size=args.img_size)
+        FLOPs_and_Params(model_copy, args.img_size, args.patch_size, "cls")
         model_copy.train()
         del model_copy
     if args.distributed:
         # wait for all processes to synchronize
         dist.barrier()
-
 
     # ------------------------- Build DDP Model -------------------------
     model_without_ddp = model
@@ -251,22 +246,17 @@ def main():
         model = DDP(model, device_ids=[args.gpu])
         model_without_ddp = model.module
 
-
     # ------------------------- Build Optimzier -------------------------
-    ## learning rate
     args.base_lr = args.base_lr / 256 * args.batch_size * args.grad_accumulate    # auto scale lr
-    args.min_lr  = args.min_lr  / 256 * args.batch_size * args.grad_accumulate    # auto scale lr
-    ## optimizer
-    param_groups = lr_decay.param_groups_lrd(model_without_ddp, args.weight_decay, model_without_ddp.no_weight_decay(), args.layer_decay)
+    param_groups = lr_decay.param_groups_lrd(model_without_ddp, args.weight_decay, model_without_ddp.encoder.no_weight_decay(), args.layer_decay)
     optimizer = torch.optim.AdamW(param_groups, lr=args.base_lr)
-    ## loss scaler
     loss_scaler = NativeScaler()
-
+    print('Base lr: ', args.base_lr)
+    print('Mun  lr: ', args.min_lr)
 
     # ------------------------- Build Lr Scheduler -------------------------
-    lf = lambda x: ((1 - math.cos(x * math.pi / args.max_epoch)) / 2) * (args.min_lr / args.base_lr - 1) + 1
-    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
-
+    lr_scheduler_warmup = LinearWarmUpLrScheduler(args.base_lr, wp_iter=args.wp_epoch * len(train_dataloader))
+    lr_scheduler = build_lr_scheduler(args, optimizer)
 
     # ------------------------- Build Criterion -------------------------
     if mixup_fn is not None:
@@ -276,8 +266,8 @@ def main():
         criterion = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
     else:
         criterion = torch.nn.CrossEntropyLoss()
-    load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
-
+    load_model(args=args, model_without_ddp=model_without_ddp,
+               optimizer=optimizer, lr_scheduler=lr_scheduler, loss_scaler=loss_scaler)
 
     # ------------------------- Eval before Train Pipeline -------------------------
     if args.eval:
@@ -285,22 +275,23 @@ def main():
         test_stats = evaluate(val_dataloader, model, device, local_rank)
         print('Eval Results: [loss: %.2f][acc1: %.2f][acc5 : %.2f]' %
                 (test_stats['loss'], test_stats['acc1'], test_stats['acc5']), flush=True)
-        exit(0)
-
+        return
 
     # ------------------------- Training Pipeline -------------------------
     start_time = time.time()
     max_accuracy = -1.0
     print_rank_0("=============== Start training for {} epochs ===============".format(args.max_epoch), local_rank)
     for epoch in range(args.start_epoch, args.max_epoch):
-        # train one epoch
         if args.distributed:
             train_dataloader.batch_sampler.sampler.set_epoch(epoch)
-        train_stats = train_one_epoch(args, device, model, train_dataloader, optimizer, epoch,
-                                      lf, loss_scaler, criterion, local_rank, tblogger, mixup_fn)
+
+        # train one epoch
+        train_one_epoch(args, device, model, train_dataloader, optimizer, epoch,
+                        lr_scheduler_warmup, loss_scaler, criterion, local_rank, tblogger, mixup_fn)
 
         # LR scheduler
-        lr_scheduler.step()
+        if (epoch + 1) > args.wp_epoch:
+            lr_scheduler.step()
 
         # Evaluate
         if (epoch % args.eval_epoch) == 0 or (epoch + 1 == args.max_epoch):
@@ -313,7 +304,7 @@ def main():
             if local_rank <= 0:
                 print('- saving the model after {} epochs ...'.format(epoch))
                 save_model(args=args, model=model, model_without_ddp=model_without_ddp,
-                           optimizer=optimizer, loss_scaler=loss_scaler, epoch=epoch, acc1=max_accuracy)
+                           optimizer=optimizer, lr_scheduler=lr_scheduler, loss_scaler=loss_scaler, epoch=epoch, acc1=max_accuracy)
         if args.distributed:
             dist.barrier()
 

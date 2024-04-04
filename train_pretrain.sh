@@ -7,22 +7,16 @@ WORLD_SIZE=$5
 RESUME=$6
 
 # ------------------- Training setting -------------------
-if [[ $MODEL == *"aim"* ]]; then
-    MASK_RATIO=0.75
-    # Optimizer config
-    OPTIMIZER="adamw"
-    BASE_LR=0.00015
-    MIN_LR=0
-    WEIGHT_DECAY=0.05
-    # Epoch
-    MAX_EPOCH=800
-    WP_EPOCH=40
-    EVAL_EPOCH=20
-else
-    echo "Unknown model!!"
-    exit 1
-fi
-
+# Optimizer config
+OPTIMIZER="adamw"
+LRSCHEDULER="cosine"
+BASE_LR=0.00015
+MIN_LR=0
+WEIGHT_DECAY=0.05
+# Epoch
+MAX_EPOCH=800
+WP_EPOCH=40
+EVAL_EPOCH=20
 
 # ------------------- Dataset setting -------------------
 if [[ $DATASET == "cifar10" ]]; then
@@ -46,29 +40,11 @@ else
     exit 1
 fi
 
-
 # ------------------- Training pipeline -------------------
-if [ $WORLD_SIZE == 1 ]; then
-    python main_pretrain.py \
-            --cuda \
-            --root ${DATASET_ROOT} \
-            --dataset ${DATASET} \
-            --model ${MODEL} \
-            --resume ${RESUME} \
-            --batch_size ${BATCH_SIZE} \
-            --img_size ${IMG_SIZE} \
-            --patch_size ${PATCH_SIZE} \
-            --max_epoch ${MAX_EPOCH} \
-            --wp_epoch ${WP_EPOCH} \
-            --eval_epoch ${EVAL_EPOCH} \
-            --optimizer ${OPTIMIZER} \
-            --base_lr ${BASE_LR} \
-            --min_lr ${MIN_LR} \
-            --weight_decay ${WEIGHT_DECAY}
-elif [[ $WORLD_SIZE -gt 1 && $WORLD_SIZE -le 8 ]]; then
+if (( $WORLD_SIZE >= 1 && $WORLD_SIZE <= 8 )); then
     python -m torch.distributed.run --nproc_per_node=${WORLD_SIZE} --master_port 1700 main_pretrain.py \
             --cuda \
-            -dist \
+            --distributed \
             --root ${DATASET_ROOT} \
             --dataset ${DATASET} \
             --model ${MODEL} \

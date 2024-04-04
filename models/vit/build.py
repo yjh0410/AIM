@@ -39,7 +39,7 @@ def load_mae_pretrained(model, ckpt=None):
         print('- Loading pretrained from: {}'.format(ckpt))
         checkpoint = torch.load(ckpt, map_location='cpu')
         # checkpoint state dict
-        encoder_state_dict = checkpoint.pop("encoder")
+        encoder_state_dict = checkpoint.pop("aim_encoder")
 
         # load encoder weight into ViT's encoder
         model.load_state_dict(encoder_state_dict)

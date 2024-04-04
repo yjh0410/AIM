@@ -1,12 +1,13 @@
-# ------------------- Model setting -------------------
-MODEL="vit_tiny"
-PRETRAINED_MODEL="weights/cifar10/mae_vit_tiny/checkpoint-0.pth"
-
+# ------------------- Args setting -------------------
+MODEL=$1
+MODEL_T=$2
+BATCH_SIZE=$3
+DATASET=$4
+DATASET_ROOT=$5
+WORLD_SIZE=$6
+RESUME=$7
 
 # ------------------- Training setting -------------------
-## Batch size
-BATCH_SIZE=256
-
 ## Epoch
 MAX_EPOCH=100
 WP_EPOCH=5
@@ -16,7 +17,6 @@ EVAL_EPOCH=5
 BASE_LR=0.1
 MIN_LR=0.0
 WEIGHT_DECAY=0.05
-
 
 # ------------------- Dataset setting -------------------
 DATASET="cifar10"
@@ -45,27 +45,10 @@ fi
 
 
 # ------------------- Training pipeline -------------------
-WORLD_SIZE=1
-if [ $WORLD_SIZE == 1 ]; then
-    python main_linprobe.py \
-            --cuda \
-            --root ${ROOT} \
-            --dataset ${DATASET} \
-            -m ${MODEL} \
-            --batch_size ${BATCH_SIZE} \
-            --img_size ${IMG_SIZE} \
-            --patch_size ${PATCH_SIZE} \
-            --max_epoch ${MAX_EPOCH} \
-            --wp_epoch ${WP_EPOCH} \
-            --eval_epoch ${EVAL_EPOCH} \
-            --base_lr ${BASE_LR} \
-            --min_lr ${MIN_LR} \
-            --weight_decay ${WEIGHT_DECAY} \
-            --pretrained ${PRETRAINED_MODEL}
-elif [[ $WORLD_SIZE -gt 1 && $WORLD_SIZE -le 8 ]]; then
+if (( $WORLD_SIZE >= 1 && $WORLD_SIZE <= 8 )); then
     python -m torch.distributed.run --nproc_per_node=${WORLD_SIZE} --master_port 1668 main_linprobe.py \
             --cuda \
-            -dist \
+            --distributed \
             --root ${ROOT} \
             --dataset ${DATASET} \
             -m ${MODEL} \

@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from typing import Type, Optional, Tuple
+from typing import Type, Tuple
 
 
 # ----------------------- Basic modules -----------------------
@@ -80,12 +80,10 @@ class Attention(nn.Module):
         self.attn_drop = nn.Dropout(dropout)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(dropout)
-        if self.prefix_causal_mask:
-            assert num_patches is not None, "The num_patches should be an int type when the prefix_causal_mask is True."
-            self.register_buffer(
-                "attn_mask",
-                torch.ones(1, num_patches, num_patches, dtype=torch.bool).tril(diagonal=0),
-            )
+        self.register_buffer(
+            "attn_mask",
+            torch.ones(1, num_patches, num_patches, dtype=torch.bool).tril(diagonal=0),
+        )
 
 
     def forward(self, x, prefix_mask=None):

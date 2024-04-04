@@ -20,10 +20,10 @@ from data import build_dataset, build_dataloader
 from models import build_model
 
 # ---------------- Utils compoments ----------------
-from utils import lr_decay
 from utils import distributed_utils
 from utils.misc import setup_seed, print_rank_0, load_model, save_model
 from utils.misc import NativeScalerWithGradNormCount as NativeScaler
+from utils.lr_scheduler import build_lr_scheduler, LinearWarmUpLrScheduler
 from utils.com_flops_params import FLOPs_and_Params
 from utils.lars import LARS
 
@@ -42,8 +42,6 @@ def parse_args():
                         help='3 for RGB; 1 for Gray.')    
     parser.add_argument('--patch_size', type=int, default=16,
                         help='patch_size.')    
-    parser.add_argument('--color_format', type=str, default='rgb',
-                        help='color format: rgb or bgr')    
     parser.add_argument('--cuda', action='store_true', default=False,
                         help='use cuda')
     parser.add_argument('--batch_size', type=int, default=256,
@@ -73,7 +71,7 @@ def parse_args():
     parser.add_argument('--num_classes', type=int, default=None, 
                         help='number of classes.')
     # Model
-    parser.add_argument('-m', '--model', type=str, default='vit_tiny',
+    parser.add_argument('-m', '--model', type=str, default='vit_t',
                         help='model name')
     parser.add_argument('--pretrained', default=None, type=str,
                         help='load pretrained weight.')
@@ -86,6 +84,8 @@ def parse_args():
     parser.add_argument('--drop_path', type=float, default=0.,
                         help='drop_path')
     # Optimizer
+    parser.add_argument('-lrs', '--lr_scheduler', type=str, default='cosine',
+                        help='step, cosine')
     parser.add_argument('-wd', '--weight_decay', type=float, default=0.05,
                         help='weight decay')
     parser.add_argument('--base_lr', type=float, default=0.1,
@@ -175,7 +175,7 @@ def main():
     print('Val dataset size   : ', len(val_dataset))
 
     # ------------------------- Build Model -------------------------
-    model = build_model(args)
+    model = build_model(args, model_type='cls')
     model.classifier = torch.nn.Sequential(
         nn.BatchNorm1d(model.classifier.in_features, affine=False, eps=1e-6),
         model.classifier)
@@ -200,19 +200,17 @@ def main():
     # ------------------------- Build Optimzier -------------------------
     ## learning rate
     args.base_lr = args.base_lr / 256 * args.batch_size * args.grad_accumulate    # auto scale lr
-    args.min_lr  = args.min_lr  / 256 * args.batch_size * args.grad_accumulate    # auto scale lr
-    ## optimizer
     optimizer = LARS(model_without_ddp.classifier.parameters(), lr=args.base_lr, weight_decay=args.weight_decay)
-    ## loss scaler
     loss_scaler = NativeScaler()
 
     # ------------------------- Build Lr Scheduler -------------------------
-    lf = lambda x: ((1 - math.cos(x * math.pi / args.max_epoch)) / 2) * (args.min_lr / args.base_lr - 1) + 1
-    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
+    lr_scheduler_warmup = LinearWarmUpLrScheduler(args.base_lr, wp_iter=args.wp_epoch * len(train_dataloader))
+    lr_scheduler = build_lr_scheduler(args, optimizer)
 
     # ------------------------- Build Criterion -------------------------
     criterion = torch.nn.CrossEntropyLoss()
-    load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
+    load_model(args=args, model_without_ddp=model_without_ddp,
+               optimizer=optimizer, lr_scheduler=lr_scheduler, loss_scaler=loss_scaler)
 
     # ------------------------- Eval before Train Pipeline -------------------------
     if args.eval:
@@ -227,14 +225,16 @@ def main():
     max_accuracy = -1.0
     print_rank_0("=============== Start training for {} epochs ===============".format(args.max_epoch), local_rank)
     for epoch in range(args.start_epoch, args.max_epoch):
-        # train one epoch
         if args.distributed:
             train_dataloader.batch_sampler.sampler.set_epoch(epoch)
-        train_stats = train_one_epoch(args, device, model, train_dataloader, optimizer, epoch,
-                                      lf, loss_scaler, criterion, local_rank, tblogger)
+
+        # train one epoch
+        train_one_epoch(args, device, model, train_dataloader, optimizer, epoch,
+                        lr_scheduler_warmup, loss_scaler, criterion, local_rank, tblogger)
 
         # LR scheduler
-        lr_scheduler.step()
+        if (epoch + 1) > args.wp_epoch:
+            lr_scheduler.step()
 
         # Evaluate
         if (epoch % args.eval_epoch) == 0 or (epoch + 1 == args.max_epoch):
@@ -247,7 +247,7 @@ def main():
             if local_rank <= 0:
                 print('- saving the model after {} epochs ...'.format(epoch))
                 save_model(args=args, model=model, model_without_ddp=model_without_ddp,
-                           optimizer=optimizer, loss_scaler=loss_scaler, epoch=epoch, acc1=max_accuracy)
+                           optimizer=optimizer, lr_scheduler=lr_scheduler, loss_scaler=loss_scaler, epoch=epoch, acc1=max_accuracy)
         if args.distributed:
             dist.barrier()
 

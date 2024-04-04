@@ -1,45 +1,32 @@
 # ------------------- Model setting -------------------
-MODEL="vit_tiny"
-PRETRAINED_MODEL="weights/cifar10/mae_vit_tiny/checkpoint-799.pth"
-
+MODEL=$1
+BATCH_SIZE=$2
+DATASET=$3
+DATASET_ROOT=$4
+PRETRAINED_MODEL=$5
+WORLD_SIZE=$6
+RESUME=$7
 
 # ------------------- Training setting -------------------
-## Batch size
-BATCH_SIZE=256
-
-## Optimizer
 OPTIMIZER="adamw"
+LRSCHEDULER="cosine"
 MIN_LR=1e-6
 WEIGHT_DECAY=0.05
 
-if [ $MODEL == "vit_huge" ]; then
+if [ $MODEL == "vit_h" ]; then
     MAX_EPOCH=50
     WP_EPOCH=5
     EVAL_EPOCH=5
     BASE_LR=0.001
     LAYER_DECAY=0.75
     DROP_PATH=0.3
-elif [ $MODEL == "vit_large" ]; then
+elif [ $MODEL == "vit_l" ]; then
     MAX_EPOCH=50
     WP_EPOCH=5
     EVAL_EPOCH=5
     BASE_LR=0.001
     LAYER_DECAY=0.75
     DROP_PATH=0.2
-elif [ $MODEL == *"vit"* ]; then
-    MAX_EPOCH=100
-    WP_EPOCH=5
-    EVAL_EPOCH=5
-    BASE_LR=0.0005
-    LAYER_DECAY=0.65
-    DROP_PATH=0.1
-elif [ $MODEL == *"resnet"* ]; then
-    MAX_EPOCH=100
-    WP_EPOCH=5
-    EVAL_EPOCH=5
-    BASE_LR=0.0001
-    LAYER_DECAY=1.0
-    DROP_PATH=0.1
 else
     MAX_EPOCH=100
     WP_EPOCH=5
@@ -48,7 +35,6 @@ else
     LAYER_DECAY=0.65
     DROP_PATH=0.1
 fi
-
 
 # ------------------- Dataset config -------------------
 DATASET="cifar10"
@@ -77,36 +63,13 @@ fi
 
 
 # ------------------- Training pipeline -------------------
-WORLD_SIZE=1
-if [ $WORLD_SIZE == 1 ]; then
-    python main_finetune.py \
-            --cuda \
-            --root ${ROOT} \
-            --dataset ${DATASET} \
-            -m ${MODEL} \
-            --batch_size ${BATCH_SIZE} \
-            --img_size ${IMG_SIZE} \
-            --patch_size ${PATCH_SIZE} \
-            --drop_path ${DROP_PATH} \
-            --max_epoch ${MAX_EPOCH} \
-            --wp_epoch ${WP_EPOCH} \
-            --eval_epoch ${EVAL_EPOCH} \
-            --optimizer ${OPTIMIZER} \
-            --base_lr ${BASE_LR} \
-            --min_lr ${MIN_LR} \
-            --layer_decay ${LAYER_DECAY} \
-            --weight_decay ${WEIGHT_DECAY} \
-            --reprob 0.25 \
-            --mixup 0.8 \
-            --cutmix 1.0 \
-            --pretrained ${PRETRAINED_MODEL}
-elif [[ $WORLD_SIZE -gt 1 && $WORLD_SIZE -le 8 ]]; then
+if (( $WORLD_SIZE >= 1 && $WORLD_SIZE <= 8 )); then
     python -m torch.distributed.run --nproc_per_node=${WORLD_SIZE} --master_port 1668 main_finetune.py \
             --cuda \
-            -dist \
+            --distributed \
             --root ${ROOT} \
             --dataset ${DATASET} \
-            -m ${MODEL} \
+            --model ${MODEL} \
             --batch_size ${BATCH_SIZE} \
             --img_size ${IMG_SIZE} \
             --patch_size ${PATCH_SIZE} \

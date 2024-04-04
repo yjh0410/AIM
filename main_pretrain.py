@@ -184,7 +184,7 @@ def main():
     if local_rank <= 0:
         model_copy = deepcopy(model)
         model_copy.eval()
-        FLOPs_and_Params(model=model_copy, img_size=args.img_size, patch_size=args.patch_size)
+        FLOPs_and_Params(model_copy, args.img_size, args.patch_size)
         model_copy.train()
         del model_copy
     if args.distributed:
