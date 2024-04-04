@@ -36,7 +36,8 @@ class AimEncoder(nn.Module):
         self.patch_embed = PatchEmbed(in_dim, patch_embed_dim, patch_size, stride=patch_size)
         self.pos_embed   = nn.Parameter(torch.zeros(1, self.num_patches, patch_embed_dim), requires_grad=False)
         self.norm_layer  = nn.LayerNorm(patch_embed_dim)
-        self.blocks      = nn.ModuleList([ViTBlock(patch_embed_dim, qkv_bias, num_heads, self.num_patches, mlp_ratio, prefix_causal_mask, dropout)
+        self.blocks      = nn.ModuleList([ViTBlock(patch_embed_dim, qkv_bias, num_heads, self.num_patches,
+                                                   mlp_ratio, prefix_causal_mask, dropout)
                                           for _ in range(num_layers)])
 
         self._init_weights()

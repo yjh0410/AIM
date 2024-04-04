@@ -50,7 +50,8 @@ class ImageEncoderViT(nn.Module):
         self.patch_embed = PatchEmbed(in_dim, patch_embed_dim, patch_size, stride=patch_size)
         self.pos_embed   = nn.Parameter(torch.zeros(1, self.num_patches, patch_embed_dim))
         self.norm_layer  = nn.LayerNorm(patch_embed_dim)
-        self.blocks      = nn.ModuleList([ViTBlock(patch_embed_dim, qkv_bias, num_heads, self.num_patches, mlp_ratio, False, dropout)
+        self.blocks      = nn.ModuleList([ViTBlock(patch_embed_dim, qkv_bias, num_heads,
+                                                   self.num_patches, mlp_ratio, False, dropout)
                                           for _ in range(num_layers)])
 
         self._init_weights()
