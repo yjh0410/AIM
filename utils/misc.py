@@ -319,8 +319,9 @@ class ModelEMA(object):
                     v *= d
                     v += (1. - d) * msd[k].detach()
 
-def load_model(args, model_without_ddp, optimizer, loss_scaler):
+def load_model(args, model_without_ddp, optimizer, lr_scheduler, loss_scaler):
     if args.resume and args.resume.lower() != 'none':
+        print("=================== Load checkpoint ===================")
         if args.resume.startswith('https'):
             checkpoint = torch.hub.load_state_dict_from_url(
                 args.resume, map_location='cpu', check_hash=True)
@@ -329,13 +330,18 @@ def load_model(args, model_without_ddp, optimizer, loss_scaler):
         model_without_ddp.load_state_dict(checkpoint['model'])
         print("Resume checkpoint %s" % args.resume)
         if 'optimizer' in checkpoint and 'epoch' in checkpoint and not (hasattr(args, 'eval') and args.eval):
+            print('- Load optimizer from the checkpoint: ', args.resume)
             optimizer.load_state_dict(checkpoint['optimizer'])
             args.start_epoch = checkpoint['epoch'] + 1
             if 'scaler' in checkpoint:
                 loss_scaler.load_state_dict(checkpoint['scaler'])
             print("With optim & sched!")
 
-def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, acc1=None):
+        if 'lr_scheduler' in checkpoint:
+            print('- Load lr scheduler from the checkpoint: ', args.resume)
+            lr_scheduler.load_state_dict(checkpoint.pop("lr_scheduler"))
+
+def save_model(args, epoch, model, model_without_ddp, optimizer, lr_scheduler, loss_scaler, acc1=None, aim_task=False):
     output_dir = Path(args.output_dir)
     epoch_name = str(epoch)
     if loss_scaler is not None:
@@ -347,10 +353,14 @@ def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, ac
             to_save = {
                 'model': model_without_ddp.state_dict(),
                 'optimizer': optimizer.state_dict(),
+                'lr_scheduler': lr_scheduler.state_dict(),
                 'epoch': epoch,
                 'scaler': loss_scaler.state_dict(),
                 'args': args,
             }
+            if aim_task:
+                to_save['aim_encoder'] = model_without_ddp.aim_encoder.state_dict()
+
             torch.save(to_save, checkpoint_path)
     else:
         client_state = {'epoch': epoch}

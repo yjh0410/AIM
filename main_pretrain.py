@@ -23,6 +23,7 @@ from models import build_model
 # ---------------- Utils compoments ----------------
 from utils import distributed_utils
 from utils.misc import setup_seed, modify_optimizer
+from utils.lr_scheduler import LinearWarmUpLrScheduler, build_lr_scheduler
 from utils.misc import load_model, save_model
 from utils.misc import unpatchify, print_rank_0
 from utils.misc import NativeScalerWithGradNormCount as NativeScaler
@@ -73,7 +74,7 @@ def parse_args():
     parser.add_argument('--num_classes', type=int, default=None, 
                         help='number of classes.')
     # Model
-    parser.add_argument('-m', '--model', type=str, default='vit_nano',
+    parser.add_argument('-m', '--model', type=str, default='vit_t',
                         help='model name')
     parser.add_argument('--resume', default=None, type=str,
                         help='keep training')
@@ -82,6 +83,8 @@ def parse_args():
     # Optimizer
     parser.add_argument('-opt', '--optimizer', type=str, default='adamw',
                         help='sgd, adam')
+    parser.add_argument('-lrs', '--lr_scheduler', type=str, default='cosine',
+                        help='step, cosine')
     parser.add_argument('-wd', '--weight_decay', type=float, default=0.05,
                         help='weight decay')
     parser.add_argument('--base_lr', type=float, default=1e-3,
@@ -120,7 +123,6 @@ def main():
     os.makedirs(path_to_save, exist_ok=True)
     args.output_dir = path_to_save
     
-    
     # ------------------------- Build DDP environment -------------------------
     local_rank = local_process_rank = -1
     if args.distributed:
@@ -137,7 +139,6 @@ def main():
     print('World size: {}'.format(distributed_utils.get_world_size()))
     print_rank_0(args, local_rank)
 
-
     # ------------------------- Build CUDA -------------------------
     if args.cuda:
         if torch.cuda.is_available():
@@ -150,7 +151,6 @@ def main():
     else:
         device = torch.device("cpu")
 
-
     # ------------------------- Build Tensorboard -------------------------
     tblogger = None
     if local_rank <= 0 and args.tfboard:
@@ -161,7 +161,6 @@ def main():
         os.makedirs(log_path, exist_ok=True)
         tblogger = SummaryWriter(log_path)
 
-
     # ------------------------- Build Transforms -------------------------
     train_transform = None
     if 'cifar' not in args.dataset:
@@ -171,20 +170,16 @@ def main():
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
     
-
     # ------------------------- Build Dataset -------------------------
-    train_dataset = build_dataset(args, transform=train_transform, is_train=True)
-
+    train_dataset = build_dataset(args, train_transform, is_train=True)
 
     # ------------------------- Build Dataloader -------------------------
     train_dataloader = build_dataloader(args, train_dataset, is_train=True)
-
     print_rank_0('=================== Dataset Information ===================', local_rank)
     print_rank_0('Train dataset size : {}'.format(len(train_dataset)), local_rank)
 
-
     # ------------------------- Build Model -------------------------
-    model = build_model(args, is_train=True)
+    model = build_model(args, model_type='aim')
     model.train().to(device)
     if local_rank <= 0:
         model_copy = deepcopy(model)
@@ -196,33 +191,29 @@ def main():
         # wait for all processes to synchronize
         dist.barrier()
 
-
     # ------------------------- Build DDP Model -------------------------
     model_without_ddp = model
     if args.distributed:
         model = DDP(model, device_ids=[args.gpu], find_unused_parameters=True)
         model_without_ddp = model.module
 
-
     # ------------------------- Build Optimzier -------------------------
-    ## learning rate
     args.base_lr = args.base_lr / 256 * args.batch_size * args.grad_accumulate  # auto scale lr
-    args.min_lr  = args.min_lr  / 256 * args.batch_size * args.grad_accumulate  # auto scale lr
-    print('Base lr: ', args.base_lr)
-    print('Mun  lr: ', args.min_lr)
-    ## modified optimizer
     optimizer = modify_optimizer(model_without_ddp, args.base_lr, args.weight_decay)
-
+    print('Base lr: ', args.base_lr)
+    print('Min  lr: ', args.min_lr)
 
     # ------------------------- Build Loss scaler -------------------------
     loss_scaler = NativeScaler()
-    load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
-
 
     # ------------------------- Build Lr Scheduler -------------------------
-    lf = lambda x: ((1 - math.cos(x * math.pi / args.max_epoch)) / 2) * (args.min_lr / args.base_lr - 1) + 1
-    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
+    lr_scheduler_warmup = LinearWarmUpLrScheduler(args.base_lr, wp_iter=args.wp_epoch * len(train_dataloader))
+    lr_scheduler = build_lr_scheduler(args, optimizer)
 
+    # ------------------------- Build Loss scaler -------------------------
+    loss_scaler = NativeScaler()
+    load_model(args=args, model_without_ddp=model_without_ddp,
+               optimizer=optimizer, lr_scheduler=lr_scheduler, loss_scaler=loss_scaler)
 
     # ------------------------- Eval before Train Pipeline -------------------------
     if args.eval:
@@ -230,24 +221,26 @@ def main():
         visualize(args, device, model_without_ddp)
         exit(0)
 
-
     # ------------------------- Training Pipeline -------------------------
     start_time = time.time()
     print_rank_0("=============== Start training for {} epochs ===============".format(args.max_epoch), local_rank)
     for epoch in range(args.start_epoch, args.max_epoch):
-        # Train one epoch
         if args.distributed:
             train_dataloader.batch_sampler.sampler.set_epoch(epoch)
-        train_stats = train_one_epoch(args, device, model, train_dataloader, optimizer, epoch, lf, loss_scaler, local_rank, tblogger)
+        
+        # Train one epoch
+        train_one_epoch(args, device, model, train_dataloader, optimizer, epoch,
+                        lr_scheduler_warmup, loss_scaler, local_rank, tblogger)
 
         # LR scheduler
-        lr_scheduler.step()
+        if (epoch + 1) > args.wp_epoch:
+            lr_scheduler.step()
 
         # Evaluate
         if local_rank <= 0 and (epoch % args.eval_epoch == 0 or epoch + 1 == args.max_epoch):
             print('- saving the model after {} epochs ...'.format(epoch))
             save_model(args=args, model=model, model_without_ddp=model_without_ddp,
-                       optimizer=optimizer, loss_scaler=loss_scaler, epoch=epoch)
+                       optimizer=optimizer, lr_scheduler=lr_scheduler, loss_scaler=loss_scaler, epoch=epoch, aim_task=True)
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
