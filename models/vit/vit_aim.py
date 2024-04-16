@@ -92,7 +92,7 @@ class AimEncoder(nn.Module):
         x = x + self.pos_embed
 
         # Apply Transformer blocks
-        for block in self.blocks     :
+        for block in self.blocks:
             x = block(x, mask)
         x = self.norm_layer(x)
 

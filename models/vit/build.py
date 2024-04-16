@@ -17,12 +17,12 @@ def build_vision_transformer(args, model_type='default'):
     elif model_type == 'cls':
         image_encoder = build_vit(args.model, args.img_size, args.patch_size, args.img_dim)
         model = ViTForImageClassification(image_encoder, num_classes=args.num_classes, qkv_bias=True)
-        load_mae_pretrained(model.encoder, args.pretrained)
+        load_aim_pretrained(model.encoder, args.pretrained)
 
     # ----------- Vison Backbone -----------
     elif model_type == 'default':
         model = build_vit(args.model, args.img_size, args.patch_size, args.img_dim)
-        load_mae_pretrained(model, args.pretrained)
+        load_aim_pretrained(model, args.pretrained)
         
     else:
         raise NotImplementedError("Unknown model type: {}".format(model_type))
@@ -30,7 +30,7 @@ def build_vision_transformer(args, model_type='default'):
     return model
 
 
-def load_mae_pretrained(model, ckpt=None):
+def load_aim_pretrained(model, ckpt=None):
     if ckpt is not None:
         # check path
         if not os.path.exists(ckpt):
