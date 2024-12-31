@@ -9,7 +9,6 @@ RESUME=$7
 
 # ------------------- Training setting -------------------
 OPTIMIZER="adamw"
-LRSCHEDULER="cosine"
 MIN_LR=1e-6
 WEIGHT_DECAY=0.05
 
@@ -20,6 +19,9 @@ if [ $MODEL == "vit_h" ]; then
     BASE_LR=0.001
     LAYER_DECAY=0.75
     DROP_PATH=0.3
+    MIXUP=0.8
+    CUTMIX=1.0
+
 elif [ $MODEL == "vit_l" ]; then
     MAX_EPOCH=50
     WP_EPOCH=5
@@ -27,6 +29,39 @@ elif [ $MODEL == "vit_l" ]; then
     BASE_LR=0.001
     LAYER_DECAY=0.75
     DROP_PATH=0.2
+    MIXUP=0.8
+    CUTMIX=1.0
+    
+elif [ $MODEL == "vit_b" ]; then
+    MAX_EPOCH=50
+    WP_EPOCH=5
+    EVAL_EPOCH=5
+    BASE_LR=0.001
+    LAYER_DECAY=0.75
+    DROP_PATH=0.1
+    MIXUP=0.8
+    CUTMIX=1.0
+    
+elif [ $MODEL == "vit_s" ]; then
+    MAX_EPOCH=100
+    WP_EPOCH=5
+    EVAL_EPOCH=5
+    BASE_LR=0.001
+    LAYER_DECAY=1.0
+    DROP_PATH=0.1
+    MIXUP=0.8
+    CUTMIX=0.0
+    
+elif [ $MODEL == "vit_y" ]; then
+    MAX_EPOCH=100
+    WP_EPOCH=5
+    EVAL_EPOCH=5
+    BASE_LR=0.001
+    LAYER_DECAY=1.0
+    DROP_PATH=0.1
+    MIXUP=0.8
+    CUTMIX=0.0
+    
 else
     MAX_EPOCH=100
     WP_EPOCH=5

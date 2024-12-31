@@ -9,7 +9,6 @@ RESUME=$6
 # ------------------- Training setting -------------------
 # Optimizer config
 OPTIMIZER="adamw"
-LRSCHEDULER="cosine"
 BASE_LR=0.00015
 MIN_LR=0
 WEIGHT_DECAY=0.05
@@ -23,18 +22,10 @@ if [[ $DATASET == "cifar10" ]]; then
     IMG_SIZE=32
     PATCH_SIZE=2
     NUM_CLASSES=10
-elif [[ $DATASET == "cifar100" ]]; then
-    IMG_SIZE=32
-    PATCH_SIZE=2
-    NUM_CLASSES=100
-elif [[ $DATASET == "imagenet_1k" || $DATASET == "imagenet_22k" ]]; then
+elif [[ $DATASET == "imagenet_1k" ]]; then
     IMG_SIZE=224
     PATCH_SIZE=16
     NUM_CLASSES=1000
-elif [[ $DATASET == "custom" ]]; then
-    IMG_SIZE=224
-    PATCH_SIZE=16
-    NUM_CLASSES=2
 else
     echo "Unknown dataset!!"
     exit 1
