@@ -1,19 +1,23 @@
-# --------------------------------------------------------------------
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
-# --------------------------------------------------------------------
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from typing import Type, Tuple
-
 
 # ----------------------- Basic modules -----------------------
+class RMSNorm(torch.nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def _norm(self, x):
+        # y = x / sqrt(E[x^2] + eps)
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x):
+        output = self._norm(x.float()).type_as(x)
+        return output * self.weight
+    
 def scaled_dot_product_attention(query, key, value, attn_mask=None):
     """
     :param query: Query 向量 (batch_size, n_heads, seq_len, d_k)
@@ -47,7 +51,7 @@ class FeedForward(nn.Module):
         self.drop1 = nn.Dropout(dropout)
         self.fc2   = nn.Linear(mlp_dim, embedding_dim)
         self.drop2 = nn.Dropout(dropout)
-        self.act   = nn.GELU()
+        self.act   = nn.SiLU(inplace=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.fc1(x)
@@ -78,8 +82,8 @@ class Attention(nn.Module):
 
         # --------------- Network parameters ---------------
         self.qkv = nn.Linear(dim, dim*3, bias = qkv_bias)
-        self.q_norm = nn.LayerNorm(self.head_dim) if qk_norm else nn.Identity()
-        self.k_norm = nn.LayerNorm(self.head_dim) if qk_norm else nn.Identity()
+        self.q_norm = RMSNorm(self.head_dim) if qk_norm else nn.Identity()
+        self.k_norm = RMSNorm(self.head_dim) if qk_norm else nn.Identity()
         
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
@@ -177,7 +181,7 @@ class ViTBlock(nn.Module):
                  ) -> None:
         super().__init__()
         # -------------- Model parameters --------------
-        self.norm1 = nn.LayerNorm(dim)
+        self.norm1 = RMSNorm(dim)
         self.attn  = Attention(dim       = dim,
                                qkv_bias  = qkv_bias,
                                qk_norm   = qk_norm,
@@ -188,7 +192,7 @@ class ViTBlock(nn.Module):
                                )
         self.drop_path1 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         
-        self.norm2 = nn.LayerNorm(dim)
+        self.norm2 = RMSNorm(dim)
         self.mlp   = FeedForward(embedding_dim=dim,
                                  mlp_dim=int(dim * mlp_ratio),
                                  dropout=proj_drop,

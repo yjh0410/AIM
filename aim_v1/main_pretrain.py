@@ -86,7 +86,7 @@ def parse_args():
                         help='sgd, adam')
     parser.add_argument('-wd', '--weight_decay', type=float, default=0.05,
                         help='weight decay')
-    parser.add_argument('--base_lr', type=float, default=1e-3,
+    parser.add_argument('--base_lr', type=float, default=0.00015,
                         help='learning rate for training model')
     parser.add_argument('--min_lr', type=float, default=0,
                         help='the final lr')
@@ -190,7 +190,8 @@ def main():
 
     # ------------------------- Build Optimzier -------------------------
     args.base_lr = args.base_lr / 256 * args.batch_size  # auto scale lr
-    param_groups = optim_factory.add_weight_decay(model_without_ddp, args.weight_decay)
+    # param_groups = optim_factory.add_weight_decay(model_without_ddp, args.weight_decay)
+    param_groups = optim_factory.param_groups_weight_decay(model_without_ddp, args.weight_decay)
     optimizer = torch.optim.AdamW(param_groups, lr=args.base_lr, betas=[0.9, 0.95])
     print(' - Base lr: ', args.base_lr)
     print(' - Min  lr: ', args.min_lr)
