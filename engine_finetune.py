@@ -60,12 +60,13 @@ def train_one_epoch(args,
             sys.exit(1)
 
         # Backward & Optimize
-        loss /= args.grad_accumulate
-        loss_scaler(loss, optimizer, clip_grad=args.max_grad_norm, 
-                    parameters=model.parameters(), create_graph=False,
-                    update_grad=(iter_i + 1) % args.grad_accumulate == 0)
-        if (iter_i + 1) % args.grad_accumulate == 0:
-            optimizer.zero_grad()
+        loss_scaler(loss = loss,
+                    optimizer = optimizer,
+                    clip_grad = args.max_grad_norm, 
+                    parameters = model.parameters(),
+                    create_graph = False,
+                    )
+        optimizer.zero_grad()
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -103,7 +104,7 @@ def evaluate(data_loader, model, device, local_rank):
 
     for batch in metric_logger.log_every(data_loader, 10, header):
         images = batch[0]
-        target = batch[-1]
+        target = batch[1]
         images = images.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
 

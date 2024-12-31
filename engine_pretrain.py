@@ -53,11 +53,8 @@ def train_one_epoch(args,
             sys.exit(1)
 
         # Backward & Optimize
-        loss /= args.grad_accumulate
-        loss_scaler(loss, optimizer, parameters=model.parameters(),
-                    update_grad=(iter_i + 1) % args.grad_accumulate == 0)
-        if (iter_i + 1) % args.grad_accumulate == 0:
-            optimizer.zero_grad()
+        loss_scaler(loss, optimizer, parameters=model.parameters())
+        optimizer.zero_grad()
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()

@@ -5,7 +5,7 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 # --------------------------------------------------------------------
-
+import math
 import torch
 import torch.nn as nn
 
@@ -20,46 +20,42 @@ class ImageEncoderViT(nn.Module):
     def __init__(self,
                  img_size: int,
                  patch_size: int,
-                 in_dim: int,
+                 in_chans: int,
                  patch_embed_dim: int,
-                 num_layers: int,
+                 depth: int,
                  num_heads: int,
                  mlp_ratio: float,
-                 qkv_bias: bool,
-                 dropout: float = 0.0,
+                 attn_drop_rate: float = 0.,
+                 proj_drop_rate: float = 0.,
+                 drop_path_rate: float = 0.,
                  ) -> None:
-        """
-        Args:
-            img_size (int): Input image size.
-            patch_size (int): Patch size.
-            in_dim (int): Number of input image channels.
-            patch_embed_dim (int): Patch embedding dimension.
-            depth (int): Depth of ViT.
-            num_heads (int): Number of attention heads in each ViT block.
-            mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.
-        """
         super().__init__()
         # ----------- Basic parameters -----------
         self.img_size = img_size
         self.patch_size = patch_size
+        self.image_embedding_size = img_size // ((patch_size if patch_size > 0 else 1))
         self.patch_embed_dim = patch_embed_dim
         self.num_heads = num_heads
         self.num_patches = (img_size // patch_size) ** 2
         # ----------- Model parameters -----------
-        self.patch_embed = PatchEmbed(in_dim, patch_embed_dim, patch_size, stride=patch_size)
-        self.pos_embed   = nn.Parameter(torch.zeros(1, self.num_patches, patch_embed_dim))
-        self.norm_layer  = nn.LayerNorm(patch_embed_dim)
-        self.blocks      = nn.ModuleList([ViTBlock(patch_embed_dim, qkv_bias, num_heads, self.num_patches,
-                                                   mlp_ratio, False, dropout)
-                                          for _ in range(num_layers)])
+        self.patch_embed = PatchEmbed(in_chans, patch_embed_dim, patch_size, stride=patch_size)
+
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
+        self.blocks = nn.ModuleList([
+            ViTBlock(patch_embed_dim,
+                     num_heads,
+                     mlp_ratio,
+                     qkv_bias = True,
+                     drop_path=dpr[i],
+                     attn_drop=attn_drop_rate,
+                     proj_drop=proj_drop_rate
+                     )
+            for i in range(depth)])
+        self.norm = nn.LayerNorm(patch_embed_dim)
 
         self._init_weights()
 
     def _init_weights(self):
-        # initialize (and freeze) pos_embed by sin-cos embedding
-        pos_embed = self.get_posembed(self.pos_embed.shape[-1], int(self.num_patches**.5))
-        self.pos_embed.data.copy_(pos_embed)
-
         # initialize nn.Linear and nn.LayerNorm
         for m in self.modules():           
             if isinstance(m, nn.Linear):
@@ -71,13 +67,9 @@ class ImageEncoderViT(nn.Module):
                 nn.init.constant_(m.bias, 0)
                 nn.init.constant_(m.weight, 1.0)
 
-    @torch.jit.ignore
-    def no_weight_decay(self):
-        return {'pos_embed', 'cls_token', 'dist_token'}
-
-    def get_posembed(self, embed_dim, grid_size, temperature=10000):
-        scale = 2 * torch.pi
-        grid_h, grid_w = grid_size, grid_size
+    def get_posembed(self, embed_dim, grid_shape, temperature=10000):
+        scale = 2 * math.pi
+        grid_h, grid_w = grid_shape
         num_pos_feats = embed_dim // 2
         # get grid
         y_embed, x_embed = torch.meshgrid([torch.arange(grid_h, dtype=torch.float32),
@@ -98,20 +90,28 @@ class ImageEncoderViT(nn.Module):
         # [H, W, C] -> [N, C]
         pos_embed = torch.cat((pos_y, pos_x), dim=-1).view(-1, embed_dim)
 
-        return pos_embed.unsqueeze(0)
+        return pos_embed
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Patch embed
+        B = x.shape[0]
         x = self.patch_embed(x)
+        bs, c, h, w = x.shape
+
+        # [bs, c, h, w] -> [bs, c, hw] -> [bs, hw, c]
         x = x.flatten(2).permute(0, 2, 1).contiguous()
 
+        # Calculate pos embed
+        pos_embed = self.get_posembed(embed_dim=c, grid_shape=[h, w])
+        pos_embed = pos_embed.to(x.device)
+
         # Add pos embed
-        x = x + self.pos_embed
+        x = x + pos_embed
 
         # Apply Transformer blocks
         for block in self.blocks:
             x = block(x)
-        x = self.norm_layer(x)
+        x = self.norm(x)
 
         return x
 
@@ -121,53 +121,53 @@ def build_vit(model_name="vit_t", img_size=224, patch_size=16, img_dim=3):
     if model_name == "vit_t":
         return ImageEncoderViT(img_size=img_size,
                                patch_size=patch_size,
-                               in_dim=img_dim,
+                               in_chans=img_dim,
                                patch_embed_dim=192,
-                               num_layers=12,
+                               depth=12,
                                num_heads=3,
                                mlp_ratio=4.0,
-                               qkv_bias=False,
-                               dropout=0.1)
+                               drop_path_rate=0.1,
+                               )
     if model_name == "vit_s":
         return ImageEncoderViT(img_size=img_size,
                                patch_size=patch_size,
-                               in_dim=img_dim,
+                               in_chans=img_dim,
                                patch_embed_dim=384,
-                               num_layers=12,
+                               depth=12,
                                num_heads=6,
                                mlp_ratio=4.0,
-                               qkv_bias=False,
-                               dropout=0.1)
+                               drop_path_rate=0.1,
+                               )
     if model_name == "vit_b":
         return ImageEncoderViT(img_size=img_size,
                                patch_size=patch_size,
-                               in_dim=img_dim,
+                               in_chans=img_dim,
                                patch_embed_dim=768,
-                               num_layers=12,
+                               depth=12,
                                num_heads=12,
                                mlp_ratio=4.0,
-                               qkv_bias=False,
-                               dropout=0.1)
+                               drop_path_rate=0.1,
+                               )
     if model_name == "vit_l":
         return ImageEncoderViT(img_size=img_size,
                                patch_size=patch_size,
-                               in_dim=img_dim,
+                               in_chans=img_dim,
                                patch_embed_dim=1024,
-                               num_layers=24,
+                               depth=24,
                                num_heads=16,
                                mlp_ratio=4.0,
-                               qkv_bias=False,
-                               dropout=0.1)
+                               drop_path_rate=0.1,
+                               )
     if model_name == "vit_h":
         return ImageEncoderViT(img_size=img_size,
                                patch_size=patch_size,
-                               in_dim=img_dim,
+                               in_chans=img_dim,
                                patch_embed_dim=1280,
-                               num_layers=32,
+                               depth=32,
                                num_heads=16,
                                mlp_ratio=4.0,
-                               qkv_bias=False,
-                               dropout=0.1)
+                               drop_path_rate=0.1,
+                               )
     
 
 if __name__ == '__main__':

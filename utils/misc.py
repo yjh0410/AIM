@@ -359,7 +359,7 @@ def save_model(args, epoch, model, model_without_ddp, optimizer, lr_scheduler, l
                 'args': args,
             }
             if aim_task:
-                to_save['aim_encoder'] = model_without_ddp.aim_encoder.state_dict()
+                to_save['encoder'] = model_without_ddp.aim_encoder.state_dict()
 
             torch.save(to_save, checkpoint_path)
     else:

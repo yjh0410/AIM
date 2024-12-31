@@ -1,7 +1,6 @@
 import os
 import cv2
 import time
-import math
 import datetime
 import argparse
 import numpy as np
@@ -13,20 +12,24 @@ import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+# ---------------- Timm compoments ----------------
+import timm
+import timm.optim.optim_factory as optim_factory
+
 # ---------------- Torchvision compoments ----------------
 import torchvision.transforms as transforms
 
 # ---------------- Dataset compoments ----------------
-from data import build_dataset, build_dataloader
+from dataset import build_dataset, build_dataloader
 from models import build_model
 
 # ---------------- Utils compoments ----------------
 from utils import distributed_utils
-from utils.misc import setup_seed, modify_optimizer
-from utils.lr_scheduler import LinearWarmUpLrScheduler, build_lr_scheduler
+from utils.misc import setup_seed
 from utils.misc import load_model, save_model
 from utils.misc import unpatchify, print_rank_0
 from utils.misc import NativeScalerWithGradNormCount as NativeScaler
+from utils.lr_scheduler import LinearWarmUpLrScheduler
 from utils.com_flops_params import FLOPs_and_Params
 
 # ---------------- Training engine ----------------
@@ -74,34 +77,26 @@ def parse_args():
     parser.add_argument('--num_classes', type=int, default=None, 
                         help='number of classes.')
     # Model
-    parser.add_argument('-m', '--model', type=str, default='vit_t',
+    parser.add_argument('--model', type=str, default='vit_t',
                         help='model name')
     parser.add_argument('--resume', default=None, type=str,
                         help='keep training')
-    parser.add_argument('--drop_path', type=float, default=0.,
-                        help='drop_path')
     # Optimizer
     parser.add_argument('-opt', '--optimizer', type=str, default='adamw',
                         help='sgd, adam')
-    parser.add_argument('-lrs', '--lr_scheduler', type=str, default='cosine',
-                        help='step, cosine')
     parser.add_argument('-wd', '--weight_decay', type=float, default=0.05,
                         help='weight decay')
     parser.add_argument('--base_lr', type=float, default=1e-3,
                         help='learning rate for training model')
     parser.add_argument('--min_lr', type=float, default=0,
                         help='the final lr')
-    parser.add_argument('-accu', '--grad_accumulate', type=int, default=1,
-                        help='gradient accumulation')
     parser.add_argument('--max_grad_norm', type=float, default=1.0,
                         help='Clip gradient norm (default: None, no clipping)')
     # Loss
-    parser.add_argument('--loss_type', type=str, default="mae", choices=["mae", "sim_mae"],
-                        help='loss type.')
     parser.add_argument('--norm_pix_loss', action='store_true', default=False,
                         help='normalize pixels before computing loss.')
     # DDP
-    parser.add_argument('-dist', '--distributed', action='store_true', default=False,
+    parser.add_argument('--distributed', action='store_true', default=False,
                         help='distributed training')
     parser.add_argument('--dist_url', default='env://', 
                         help='url used to set up distributed training')
@@ -176,17 +171,13 @@ def main():
     # ------------------------- Build Dataloader -------------------------
     train_dataloader = build_dataloader(args, train_dataset, is_train=True)
     print_rank_0('=================== Dataset Information ===================', local_rank)
-    print_rank_0('Train dataset size : {}'.format(len(train_dataset)), local_rank)
+    print_rank_0(' - Train dataset size : {}'.format(len(train_dataset)), local_rank)
 
     # ------------------------- Build Model -------------------------
     model = build_model(args, model_type='aim')
     model.train().to(device)
     if local_rank <= 0:
-        model_copy = deepcopy(model)
-        model_copy.eval()
-        FLOPs_and_Params(model_copy, args.img_size, args.patch_size)
-        model_copy.train()
-        del model_copy
+        FLOPs_and_Params(deepcopy(model).eval(), args.img_size, args.patch_size)
     if args.distributed:
         # wait for all processes to synchronize
         dist.barrier()
@@ -194,21 +185,19 @@ def main():
     # ------------------------- Build DDP Model -------------------------
     model_without_ddp = model
     if args.distributed:
-        model = DDP(model, device_ids=[args.gpu], find_unused_parameters=True)
+        model = DDP(model, device_ids=[args.gpu])
         model_without_ddp = model.module
 
     # ------------------------- Build Optimzier -------------------------
-    args.base_lr = args.base_lr / 256 * args.batch_size * args.grad_accumulate  # auto scale lr
-    optimizer = modify_optimizer(model_without_ddp, args.base_lr, args.weight_decay)
-    print('Base lr: ', args.base_lr)
-    print('Min  lr: ', args.min_lr)
-
-    # ------------------------- Build Loss scaler -------------------------
-    loss_scaler = NativeScaler()
+    args.base_lr = args.base_lr / 256 * args.batch_size  # auto scale lr
+    param_groups = optim_factory.add_weight_decay(model_without_ddp, args.weight_decay)
+    optimizer = torch.optim.AdamW(param_groups, lr=args.base_lr, betas=[0.9, 0.95])
+    print(' - Base lr: ', args.base_lr)
+    print(' - Min  lr: ', args.min_lr)
 
     # ------------------------- Build Lr Scheduler -------------------------
     lr_scheduler_warmup = LinearWarmUpLrScheduler(args.base_lr, wp_iter=args.wp_epoch * len(train_dataloader))
-    lr_scheduler = build_lr_scheduler(args, optimizer)
+    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.max_epoch - args.wp_epoch - 1, eta_min=args.min_lr)
 
     # ------------------------- Build Loss scaler -------------------------
     loss_scaler = NativeScaler()
@@ -223,14 +212,23 @@ def main():
 
     # ------------------------- Training Pipeline -------------------------
     start_time = time.time()
-    print_rank_0("=============== Start training for {} epochs ===============".format(args.max_epoch), local_rank)
+    print_rank_0(" =============== Start training for {} epochs =============== ".format(args.max_epoch), local_rank)
     for epoch in range(args.start_epoch, args.max_epoch):
         if args.distributed:
             train_dataloader.batch_sampler.sampler.set_epoch(epoch)
         
         # Train one epoch
-        train_one_epoch(args, device, model, train_dataloader, optimizer, epoch,
-                        lr_scheduler_warmup, loss_scaler, local_rank, tblogger)
+        train_one_epoch(args = args,
+                        device = device,
+                        model = model,
+                        data_loader = train_dataloader,
+                        optimizer = optimizer,
+                        epoch = epoch,
+                        lr_scheduler_warmup = lr_scheduler_warmup,
+                        loss_scaler = loss_scaler,
+                        local_rank = local_rank,
+                        tblogger = tblogger,
+                        )
 
         # LR scheduler
         if (epoch + 1) > args.wp_epoch:

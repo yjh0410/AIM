@@ -13,16 +13,17 @@ class ImageNet1KDataset(data.Dataset):
     def __init__(self, args, is_train=False, transform=None):
         super().__init__()
         # ----------------- basic parameters -----------------
+        self.data_path = os.path.join(args.root, self.image_set)
         self.args = args
         self.is_train  = is_train
         self.pixel_mean = [0.485, 0.456, 0.406]
-        self.pixel_std = [0.229, 0.224, 0.225]
-        print("Pixel mean: {}".format(self.pixel_mean))
-        print("Pixel std:  {}".format(self.pixel_std))
-        self.image_set = 'train' if is_train else 'val'
+        self.pixel_std  = [0.229, 0.224, 0.225]
+        print(" - Pixel mean: {}".format(self.pixel_mean))
+        print(" - Pixel std:  {}".format(self.pixel_std))
         self.num_patches = (args.img_size // args.patch_size) ** 2
-        self.data_path = os.path.join(args.root, self.image_set)
+        
         # ----------------- dataset & transforms -----------------
+        self.image_set = 'train' if is_train else 'val'
         self.transform = transform if transform is not None else self.build_transform(args)
         self.dataset = ImageFolder(root=self.data_path, transform=self.transform)
 

@@ -17,7 +17,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 # ---------------- Dataset compoments ----------------
-from data import build_dataset, build_dataloader
+from dataset import build_dataset, build_dataloader
 
 # ---------------- Model compoments ----------------
 from models import build_model
@@ -77,7 +77,7 @@ def parse_args():
     parser.add_argument('--num_classes', type=int, default=None, 
                         help='number of classes.')
     # Model
-    parser.add_argument('-m', '--model', type=str, default='aim_tiny',
+    parser.add_argument('--model', type=str, default='vit_t',
                         help='model name')
     parser.add_argument('--pretrained', default=None, type=str,
                         help='load pretrained weight.')
@@ -85,15 +85,9 @@ def parse_args():
                         help='keep training')
     parser.add_argument('--ema', action='store_true', default=False,
                         help='use ema.')
-    parser.add_argument('--learnable_pos', action='store_true', default=False,
-                        help='learnable position embedding.')
-    parser.add_argument('--drop_path', type=float, default=0.1,
-                        help='drop_path')
     # Optimizer
     parser.add_argument('-opt', '--optimizer', type=str, default='adamw',
                         help='sgd, adam')
-    parser.add_argument('-lrs', '--lr_scheduler', type=str, default='cosine',
-                        help='step, cosine')
     parser.add_argument('-wd', '--weight_decay', type=float, default=0.05,
                         help='weight decay')
     parser.add_argument('--base_lr', type=float, default=1e-3,
@@ -102,8 +96,6 @@ def parse_args():
                         help='the final lr')
     parser.add_argument('--layer_decay', type=float, default=0.75,
                         help='layer-wise lr decay from ELECTRA/BEiT')
-    parser.add_argument('-accu', '--grad_accumulate', type=int, default=1,
-                        help='gradient accumulation')
     parser.add_argument('--max_grad_norm', type=float, default=None,
                         help='Clip gradient norm (default: None, no clipping)')
     # Augmentation parameters
@@ -231,11 +223,7 @@ def main():
     model.train().to(device)
     print(model)
     if local_rank <= 0:
-        model_copy = deepcopy(model)
-        model_copy.eval()
-        FLOPs_and_Params(model_copy, args.img_size, args.patch_size, "cls")
-        model_copy.train()
-        del model_copy
+        FLOPs_and_Params(deepcopy(model).eval(), args.img_size, args.patch_size, "cls")
     if args.distributed:
         # wait for all processes to synchronize
         dist.barrier()
@@ -247,16 +235,16 @@ def main():
         model_without_ddp = model.module
 
     # ------------------------- Build Optimzier -------------------------
-    args.base_lr = args.base_lr / 256 * args.batch_size * args.grad_accumulate    # auto scale lr
-    param_groups = lr_decay.param_groups_lrd(model_without_ddp, args.weight_decay, model_without_ddp.encoder.no_weight_decay(), args.layer_decay)
+    args.base_lr = args.base_lr / 256 * args.batch_size    # auto scale lr
+    param_groups = lr_decay.param_groups_lrd(model_without_ddp, args.weight_decay, [], args.layer_decay)
     optimizer = torch.optim.AdamW(param_groups, lr=args.base_lr)
     loss_scaler = NativeScaler()
-    print('Base lr: ', args.base_lr)
-    print('Mun  lr: ', args.min_lr)
+    print(' - Base lr: ', args.base_lr)
+    print(' - Mun  lr: ', args.min_lr)
 
     # ------------------------- Build Lr Scheduler -------------------------
     lr_scheduler_warmup = LinearWarmUpLrScheduler(args.base_lr, wp_iter=args.wp_epoch * len(train_dataloader))
-    lr_scheduler = build_lr_scheduler(args, optimizer)
+    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.max_epoch - args.wp_epoch - 1, eta_min=args.min_lr)
 
     # ------------------------- Build Criterion -------------------------
     if mixup_fn is not None:
@@ -286,8 +274,19 @@ def main():
             train_dataloader.batch_sampler.sampler.set_epoch(epoch)
 
         # train one epoch
-        train_one_epoch(args, device, model, train_dataloader, optimizer, epoch,
-                        lr_scheduler_warmup, loss_scaler, criterion, local_rank, tblogger, mixup_fn)
+        train_one_epoch(args = args,
+                        device = device,
+                        model = model,
+                        data_loader = train_dataloader,
+                        optimizer = optimizer,
+                        epoch = epoch,
+                        lr_scheduler_warmup = lr_scheduler_warmup,
+                        loss_scaler = loss_scaler,
+                        criterion = criterion,
+                        local_rank = local_rank,
+                        tblogger = tblogger,
+                        mixup_fn = mixup_fn,
+                        )
 
         # LR scheduler
         if (epoch + 1) > args.wp_epoch:

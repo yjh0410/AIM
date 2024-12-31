@@ -3,50 +3,46 @@ import torch
 import torch.nn as nn
 
 try:
-    from .common import ViTBlock, PatchEmbed, MLPBlock
+    from .common import ViTBlock, PatchEmbed, FeedForward
 except:
-    from  common import ViTBlock, PatchEmbed, MLPBlock
+    from  common import ViTBlock, PatchEmbed, FeedForward
 
 
 # ------------------------ Basic Modules ------------------------
 class AimEncoder(nn.Module):
     def __init__(self,
-                 img_size      :int   = 224,
-                 patch_size    :int   = 16,
-                 in_dim        :int   = 3,
-                 patch_embed_dim :int   = 768,
-                 num_layers    :int   = 12,
-                 num_heads     :int   = 12,
-                 qkv_bias      :bool  = True,
-                 mlp_ratio     :float = 4.0,
-                 dropout       :float = 0.1,
-                 prefix_causal_mask: bool = False,
-                 ):
+                 img_size: int,
+                 patch_size: int,
+                 in_chans: int,
+                 patch_embed_dim: int,
+                 depth: int,
+                 num_heads: int,
+                 mlp_ratio: float,
+                 ) -> None:
         super().__init__()
-        # -------- basic parameters --------
+        # ----------- Basic parameters -----------
         self.img_size = img_size
-        self.in_dim = in_dim
-        self.patch_embed_dim = patch_embed_dim
-        self.num_layers = num_layers
-        self.num_heads = num_heads
         self.patch_size = patch_size
+        self.image_embedding_size = img_size // ((patch_size if patch_size > 0 else 1))
+        self.patch_embed_dim = patch_embed_dim
+        self.num_heads = num_heads
         self.num_patches = (img_size // patch_size) ** 2
-        self.prefix_causal_mask = prefix_causal_mask
-        # -------- model parameters --------
-        self.patch_embed = PatchEmbed(in_dim, patch_embed_dim, patch_size, stride=patch_size)
-        self.pos_embed   = nn.Parameter(torch.zeros(1, self.num_patches, patch_embed_dim), requires_grad=False)
-        self.norm_layer  = nn.LayerNorm(patch_embed_dim)
-        self.blocks      = nn.ModuleList([ViTBlock(patch_embed_dim, qkv_bias, num_heads, self.num_patches,
-                                                   mlp_ratio, prefix_causal_mask, dropout)
-                                          for _ in range(num_layers)])
-
+        # ----------- Model parameters -----------
+        self.patch_embed = PatchEmbed(in_chans, patch_embed_dim, patch_size, 0, patch_size)
+        self.blocks = nn.ModuleList([
+            ViTBlock(patch_embed_dim,
+                     num_heads,
+                     mlp_ratio,
+                     qkv_bias=True,
+                     qk_norm=False,
+                     prefix_causal_mask=True,
+                     )
+            for _ in range(depth)])
+        self.norm = nn.LayerNorm(patch_embed_dim)
+        
         self._init_weights()
 
     def _init_weights(self):
-        # initialize (and freeze) pos_embed by sin-cos embedding
-        pos_embed = self.get_posembed(self.pos_embed.shape[-1], int(self.num_patches**.5))
-        self.pos_embed.data.copy_(pos_embed)
-
         # initialize nn.Linear and nn.LayerNorm
         for m in self.modules():           
             if isinstance(m, nn.Linear):
@@ -58,9 +54,13 @@ class AimEncoder(nn.Module):
                 nn.init.constant_(m.bias, 0)
                 nn.init.constant_(m.weight, 1.0)
 
-    def get_posembed(self, embed_dim, grid_size, temperature=10000):
-        scale = 2 * torch.pi
-        grid_h, grid_w = grid_size, grid_size
+        # initialize patch_embed like nn.Linear (instead of nn.Conv2d)
+        w = self.patch_embed.proj.weight.data
+        torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+
+    def get_posembed(self, embed_dim, grid_shape, temperature=10000,):
+        scale = 2 * math.pi
+        grid_h, grid_w = grid_shape
         num_pos_feats = embed_dim // 2
         # get grid
         y_embed, x_embed = torch.meshgrid([torch.arange(grid_h, dtype=torch.float32),
@@ -81,21 +81,29 @@ class AimEncoder(nn.Module):
         # [H, W, C] -> [N, C]
         pos_embed = torch.cat((pos_y, pos_x), dim=-1).view(-1, embed_dim)
 
-        return pos_embed.unsqueeze(0)
+        return pos_embed
 
-    def forward(self, x, mask=None):
-        # Patch embed
+    def forward(self, x: torch.Tensor, prefix_mask: torch.Tensor) -> torch.Tensor:
+        # patch embed
         x = self.patch_embed(x)
+        bs, c, h, w = x.shape
+
+        # [bs, c, h, w] -> [bs, c, seq_len] -> [bs, seq_len, c], seq_len = hw
         x = x.flatten(2).permute(0, 2, 1).contiguous()
+        num_patches = x.shape[1]
 
-        # Add pos embed
-        x = x + self.pos_embed
+        # initialize (and freeze) pos_embed by sin-cos embedding
+        pos_embed = self.get_posembed(self.patch_embed_dim, [h, w])
+        pos_embed = pos_embed.to(x.device).unsqueeze(0)
 
-        # Apply Transformer blocks
+        # add pos embed w/o cls token
+        x = x + pos_embed
+
+        # apply Transformer blocks
         for block in self.blocks:
-            x = block(x, mask)
-        x = self.norm_layer(x)
-
+            x = block(x, prefix_mask, num_patches)
+        x = self.norm(x)
+        
         return x
 
 class AimDecoder(nn.Module):
@@ -108,7 +116,7 @@ class AimDecoder(nn.Module):
         super().__init__()
         self.in_dim = in_dim
         self.hidden_dim = round(in_dim * mlp_ratio)
-        self.pixel_decoder = nn.Sequential(*[MLPBlock(in_dim, self.hidden_dim, nn.GELU, dropout) for _ in range(num_blocks)])
+        self.pixel_decoder = nn.Sequential(*[FeedForward(in_dim, self.hidden_dim, dropout) for _ in range(num_blocks)])
         self.pixel_predictor = nn.Linear(in_dim, out_dim)
 
     def forward(self, x):
@@ -173,8 +181,9 @@ class ViTforAutoRegression(nn.Module):
         target = target[:, 1:, :]
 
         # Compute L1 loss
+        norm_factor = (seq_length - 1) * bs
         loss = (pred[:, :-1, :] - target) ** 2
-        loss = loss.mean(dim=-1).sum() / (seq_length - 1) / bs
+        loss = loss.mean(dim=-1).sum() / norm_factor
         
         return loss
 
@@ -204,65 +213,56 @@ def build_vit_aim(model_name="vit_t", img_size=224, patch_size=16, img_dim=3, no
     if model_name == "vit_t":
         encoder = AimEncoder(img_size=img_size,
                              patch_size=patch_size,
-                             in_dim=img_dim,
+                             in_chans=img_dim,
                              patch_embed_dim=192,
-                             num_layers=12,
+                             depth=12,
                              num_heads=3,
-                             qkv_bias=False,
                              mlp_ratio=4.0,
-                             dropout=0.1,
-                             prefix_causal_mask=True)
+                             )
     if model_name == "vit_s":
         encoder = AimEncoder(img_size=img_size,
                              patch_size=patch_size,
-                             in_dim=img_dim,
+                             in_chans=img_dim,
                              patch_embed_dim=384,
-                             num_layers=12,
+                             depth=12,
                              num_heads=6,
-                             qkv_bias=False,
                              mlp_ratio=4.0,
-                             dropout=0.1,
-                             prefix_causal_mask=True)
+                             )
     if model_name == "vit_b":
         encoder = AimEncoder(img_size=img_size,
                              patch_size=patch_size,
-                             in_dim=img_dim,
+                             in_chans=img_dim,
                              patch_embed_dim=768,
-                             num_layers=12,
+                             depth=12,
                              num_heads=12,
-                             qkv_bias=False,
                              mlp_ratio=4.0,
-                             dropout=0.1,
-                             prefix_causal_mask=True)
+                             )
     if model_name == "vit_l":
         encoder = AimEncoder(img_size=img_size,
                              patch_size=patch_size,
-                             in_dim=img_dim,
+                             in_chans=img_dim,
                              patch_embed_dim=1024,
-                             num_layers=24,
+                             depth=24,
                              num_heads=16,
-                             qkv_bias=False,
                              mlp_ratio=4.0,
-                             dropout=0.1,
-                             prefix_causal_mask=True)
+                             )
     if model_name == "vit_h":
         encoder = AimEncoder(img_size=img_size,
                              patch_size=patch_size,
-                             in_dim=img_dim,
+                             in_chans=img_dim,
                              patch_embed_dim=1280,
-                             num_layers=32,
+                             depth=32,
                              num_heads=16,
-                             qkv_bias=False,
                              mlp_ratio=4.0,
-                             dropout=0.1,
-                             prefix_causal_mask=True)
+                             )
     
     # ---------------- MAE Decoder ----------------
     decoder = AimDecoder(in_dim=encoder.patch_embed_dim,
                          out_dim=patch_size**2 * img_dim,
                          mlp_ratio=4.0,
-                         num_blocks=8,
-                         dropout=0.1,)
+                         num_blocks=12,
+                         dropout=0.1,
+                         )
     
     return ViTforAutoRegression(encoder, decoder, norm_pix_loss)
 

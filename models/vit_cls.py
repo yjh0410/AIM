@@ -12,13 +12,17 @@ class ViTForImageClassification(nn.Module):
     def __init__(self,
                  image_encoder :ImageEncoderViT,
                  num_classes   :int   = 1000,
-                 qkv_bias      :bool  = True,
                  ):
         super().__init__()
         # -------- Model parameters --------
         self.encoder    = image_encoder
         self.classifier = AttentionPoolingClassifier(
-            image_encoder.patch_embed_dim, num_classes, image_encoder.num_heads, qkv_bias, num_queries=1)
+            image_encoder.patch_embed_dim,
+            num_classes,
+            image_encoder.num_heads,
+            True,
+            num_queries=1,
+            )
 
     def forward(self, x):
         """
@@ -43,14 +47,14 @@ if __name__ == '__main__':
     # Build model
     encoder = ImageEncoderViT(img_size=h,
                                patch_size=patch_size,
-                               in_dim=c,
+                               in_chans=c,
                                patch_embed_dim=192,
-                               num_layers=12,
+                               depth=12,
                                num_heads=3,
                                mlp_ratio=4.0,
-                               qkv_bias=False,
-                               dropout=0.1)
-    model = ViTForImageClassification(encoder, num_classes=1000, qkv_bias=True)
+                               drop_path_rate=0.1,
+                               )
+    model = ViTForImageClassification(encoder, num_classes=1000)
 
     # Inference
     outputs = model(x)
