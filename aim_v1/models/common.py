@@ -18,28 +18,6 @@ class RMSNorm(torch.nn.Module):
         output = self._norm(x.float()).type_as(x)
         return output * self.weight
     
-def scaled_dot_product_attention(query, key, value, attn_mask=None):
-    """
-    :param query: Query 向量 (batch_size, n_heads, seq_len, d_k)
-    :param key: Key 向量 (batch_size, n_heads, seq_len, d_k)
-    :param value: Value 向量 (batch_size, n_heads, seq_len, d_v)
-    :param attn_mask: 注意力掩码 (batch_size, n_heads, seq_len, seq_len)
-    :return: 输出向量 (batch_size, n_heads, seq_len, d_v)
-    """
-    scores = torch.matmul(query, key.transpose(-2, -1))  # (batch_size, n_heads, seq_len, seq_len)
-    
-    dk = torch.tensor(key.size(-1), dtype=torch.float32)  # d_k
-    scores = scores / torch.sqrt(dk)  # 缩放点积
-    
-    if attn_mask is not None:
-        attn_mask_ = attn_mask[:, :, :scores.shape[-2], :scores.shape[-1]]
-        scores = scores.masked_fill(attn_mask_ == 0, float('-inf'))
-    attn_weights = F.softmax(scores, dim=-1)  # (batch_size, n_heads, seq_len, seq_len)
-    
-    output = torch.matmul(attn_weights, value)  # (batch_size, n_heads, seq_len, d_v)
-    
-    return output
-
 class FeedForward(nn.Module):
     def __init__(self,
                  embedding_dim: int,
@@ -123,7 +101,7 @@ class Attention(nn.Module):
         v = v.view(bs, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3).contiguous()
 
         # ----------------- Multi-head Attn -----------------
-        x = scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        x = self.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
 
         # ----------------- Output -----------------
         x = x.permute(0, 2, 1, 3).contiguous().view(bs, seq_len, -1)
@@ -131,6 +109,28 @@ class Attention(nn.Module):
         x = self.proj_drop(x)
 
         return x
+
+    def scaled_dot_product_attention(self, query, key, value, attn_mask=None):
+        """
+        :param query: Query 向量 (batch_size, n_heads, seq_len, d_k)
+        :param key: Key 向量 (batch_size, n_heads, seq_len, d_k)
+        :param value: Value 向量 (batch_size, n_heads, seq_len, d_v)
+        :param attn_mask: 注意力掩码 (batch_size, n_heads, seq_len, seq_len)
+        :return: 输出向量 (batch_size, n_heads, seq_len, d_v)
+        """
+        scores = torch.matmul(query, key.transpose(-2, -1))  # (batch_size, n_heads, seq_len, seq_len)
+        
+        dk = torch.tensor(key.size(-1), dtype=torch.float32)  # d_k
+        scores = scores / torch.sqrt(dk)  # 缩放点积
+        
+        if attn_mask is not None:
+            attn_mask_ = attn_mask[:, :, :scores.shape[-2], :scores.shape[-1]]
+            scores = scores.masked_fill(attn_mask_ == 0, float('-inf'))
+        attn_weights = F.softmax(scores, dim=-1)  # (batch_size, n_heads, seq_len, seq_len)
+        
+        output = torch.matmul(attn_weights, value)  # (batch_size, n_heads, seq_len, d_v)
+        
+        return output
 
 class DropPath(nn.Module):
     """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks).
