@@ -168,9 +168,9 @@ class ViTforAutoRegression(nn.Module):
         return imgs
 
     def compute_loss(self, x, output):
-        # Patchify the image
+        # Patchify the image: [bs, 3, h, w] -> [bs, seq_len, c], seq_len = h/p * w/p, c = p*p*3
         target = self.patchify(x, self.aim_encoder.patch_size)
-        bs, seq_length = x.shape[:2]
+        bs, seq_length = target.shape[:2]
         if self.norm_pix_loss:
             mean = target.mean(dim=-1, keepdim=True)
             var = target.var(dim=-1, keepdim=True)

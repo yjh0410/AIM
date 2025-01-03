@@ -33,7 +33,7 @@ from utils.lr_scheduler import LinearWarmUpLrScheduler
 from utils.com_flops_params import FLOPs_and_Params
 
 # ---------------- Training engine ----------------
-from engine_pretrain import train_one_epoch
+from engine_pretrain import train_one_epoch, evaluate
 
 
 def parse_args():
@@ -166,10 +166,12 @@ def main():
                 transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
     
     # ------------------------- Build Dataset -------------------------
-    train_dataset = build_dataset(args, train_transform, is_train=True)
+    train_dataset = build_dataset(args, transform = train_transform, is_train = True)
+    valid_dataset = build_dataset(args, transform = None, is_train = False)
 
     # ------------------------- Build Dataloader -------------------------
     train_dataloader = build_dataloader(args, train_dataset, is_train=True)
+    valid_dataloader = build_dataloader(args, valid_dataset, is_train=False)
     print_rank_0('=================== Dataset Information ===================', local_rank)
     print_rank_0(' - Train dataset size : {}'.format(len(train_dataset)), local_rank)
 
@@ -205,14 +207,9 @@ def main():
     load_model(args=args, model_without_ddp=model_without_ddp,
                optimizer=optimizer, lr_scheduler=lr_scheduler, loss_scaler=loss_scaler)
 
-    # ------------------------- Eval before Train Pipeline -------------------------
-    if args.eval:
-        print('visualizing ...')
-        visualize(args, device, model_without_ddp)
-        exit(0)
-
     # ------------------------- Training Pipeline -------------------------
     start_time = time.time()
+    min_loss = float("inf")
     print_rank_0(" =============== Start training for {} epochs =============== ".format(args.max_epoch), local_rank)
     for epoch in range(args.start_epoch, args.max_epoch):
         if args.distributed:
@@ -236,64 +233,28 @@ def main():
             lr_scheduler.step()
 
         # Evaluate
-        if local_rank <= 0 and (epoch % args.eval_epoch == 0 or epoch + 1 == args.max_epoch):
-            print('- saving the model after {} epochs ...'.format(epoch))
-            save_model(args=args, model=model, model_without_ddp=model_without_ddp,
-                       optimizer=optimizer, lr_scheduler=lr_scheduler, loss_scaler=loss_scaler, epoch=epoch, aim_task=True)
+        if epoch % args.eval_epoch == 0 or epoch + 1 == args.max_epoch:
+            test_stats = evaluate(valid_dataloader, model, device, local_rank)
+            print_rank_0(f" - Valid loss of the network on the {len(valid_dataset)} test images: {test_stats['loss']:.1f}", local_rank)
+            min_loss = min(min_loss, test_stats["loss"])
+            print_rank_0(f' - Min valid loss: {min_loss:.2f}', local_rank)
+
+            # Save model
+            print(' - Saving the model after {} epochs ...'.format(epoch))
+            save_model(args = args,
+                       model = model,
+                       model_without_ddp = model_without_ddp,
+                       optimizer = optimizer,
+                       lr_scheduler = lr_scheduler,
+                       loss_scaler = loss_scaler,
+                       epoch = epoch,
+                       metric = min_loss,
+                       aim_task = True,
+                       )
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print_rank_0('Training time {}'.format(total_time_str), local_rank)
-
-
-def visualize(args, device, model):
-    # test dataset
-    val_dataset = build_dataset(args, is_train=False)
-    val_dataloader = build_dataloader(args, val_dataset, is_train=False)
-
-    # save path
-    save_path = "vis_results/{}/{}".format(args.dataset, args.model)
-    os.makedirs(save_path, exist_ok=True)
-
-    # switch to evaluate mode
-    model.eval()
-    patch_size = args.patch_size
-    pixel_mean = val_dataloader.dataset.pixel_mean
-    pixel_std  = val_dataloader.dataset.pixel_std
-    with torch.no_grad():
-        for i, (images, target) in enumerate(val_dataloader):
-            images = images.to(device, non_blocking=True)
-            target = target.to(device, non_blocking=True)
-            # inference
-            output = model(images)
-
-            # denormalize input image
-            org_img = images[0].permute(1, 2, 0).cpu().numpy()
-            org_img = (org_img * pixel_std + pixel_mean) * 255.
-            org_img = org_img.astype(np.uint8)
-
-            # masked image
-            mask = output['mask'].unsqueeze(-1).repeat(1, 1, patch_size**2 *3)  # [B, H*W] -> [B, H*W, p*p*3]
-            mask = unpatchify(mask, patch_size)
-            mask = mask[0].permute(1, 2, 0).cpu().numpy()
-            masked_img = org_img * (1 - mask)  # 1 is removing, 0 is keeping
-            masked_img = masked_img.astype(np.uint8)
-
-            # denormalize reconstructed image
-            pred_img = unpatchify(output['x_pred'], patch_size)
-            pred_img = pred_img[0].permute(1, 2, 0).cpu().numpy()
-            pred_img = (pred_img * pixel_std + pixel_mean) * 255.
-            pred_img = org_img * (1 - mask) + pred_img * mask
-            pred_img = pred_img.astype(np.uint8)
-
-            # visualize
-            vis_image = np.concatenate([masked_img, org_img, pred_img], axis=1)
-            vis_image = vis_image[..., (2, 1, 0)]
-            cv2.imshow('masked | origin | reconstruct ', vis_image)
-            cv2.waitKey(0)
-
-            # save
-            cv2.imwrite('{}/{:06}.png'.format(save_path, i), vis_image)
 
 
 if __name__ == "__main__":

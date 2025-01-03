@@ -323,12 +323,12 @@ def load_model(args, model_without_ddp, optimizer, lr_scheduler, loss_scaler):
             print('- Load lr scheduler from the checkpoint: ', args.resume)
             lr_scheduler.load_state_dict(checkpoint.pop("lr_scheduler"))
 
-def save_model(args, epoch, model, model_without_ddp, optimizer, lr_scheduler, loss_scaler, acc1=None, aim_task=False):
+def save_model(args, epoch, model, model_without_ddp, optimizer, lr_scheduler, loss_scaler, metric=None, aim_task=False):
     output_dir = Path(args.output_dir)
     epoch_name = str(epoch)
     if loss_scaler is not None:
-        if acc1 is not None:
-            checkpoint_paths = [output_dir / ('checkpoint-{}-Acc1-{:.2f}.pth'.format(epoch_name, acc1))]
+        if metric is not None:
+            checkpoint_paths = [output_dir / ('checkpoint-{}-metric-{:.4f}.pth'.format(epoch_name, metric))]
         else:
             checkpoint_paths = [output_dir / ('checkpoint-{}.pth'.format(epoch_name))]
         for checkpoint_path in checkpoint_paths:

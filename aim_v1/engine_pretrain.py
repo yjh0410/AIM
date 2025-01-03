@@ -79,3 +79,30 @@ def train_one_epoch(args,
     print_rank_0("Averaged stats: {}".format(metric_logger), local_rank)
 
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+
+@torch.no_grad()
+def evaluate(data_loader, model, device, local_rank):
+    metric_logger = MetricLogger(delimiter="  ")
+    header = 'Test:'
+
+    # switch to evaluation mode
+    model.eval()
+
+    for batch in metric_logger.log_every(data_loader, 10, header):
+        images = batch[0]
+        prefix_masks = batch[2]
+        images = images.to(device, non_blocking=True)
+        prefix_masks = prefix_masks.to(device, non_blocking=True)
+
+        # compute output
+        with torch.cuda.amp.autocast():
+            output = model(images, prefix_masks)
+            loss = model.compute_loss(images, output)
+
+        metric_logger.update(loss=loss.item())
+
+    # gather the stats from all processes
+    metric_logger.synchronize_between_processes()
+    print_rank_0('* loss {losses.global_avg:.3f}'.format(losses=metric_logger.loss), local_rank)
+
+    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}

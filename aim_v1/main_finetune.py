@@ -302,8 +302,15 @@ def main():
             # Save model
             if local_rank <= 0:
                 print('- saving the model after {} epochs ...'.format(epoch))
-                save_model(args=args, model=model, model_without_ddp=model_without_ddp,
-                           optimizer=optimizer, lr_scheduler=lr_scheduler, loss_scaler=loss_scaler, epoch=epoch, acc1=max_accuracy)
+                save_model(args = args,
+                           model = model,
+                           model_without_ddp = model_without_ddp,
+                           optimizer = optimizer,
+                           lr_scheduler = lr_scheduler,
+                           loss_scaler = loss_scaler,
+                           epoch = epoch,
+                           metric = max_accuracy,
+                           )
         if args.distributed:
             dist.barrier()
 

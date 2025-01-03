@@ -1,4 +1,5 @@
 import torch.utils.data as data
+import torch
 
 from .cifar import CifarDataset
 from .imagenet import ImageNet1KDataset
@@ -17,11 +18,19 @@ def build_dataset(args, transform=None, is_train=False):
         
 
 def build_dataloader(args, dataset, is_train=False):
-    if is_train:
-        sampler = data.distributed.DistributedSampler(dataset) if args.distributed else data.RandomSampler(dataset)
-        batch_sampler_train = data.BatchSampler(sampler, args.batch_size // args.world_size, drop_last=True if is_train else False)
-        dataloader = data.DataLoader(dataset, batch_sampler=batch_sampler_train, num_workers=args.num_workers, pin_memory=True)
+    if args.distributed:
+        sampler = torch.utils.data.distributed.DistributedSampler(dataset, shuffle=is_train, drop_last=is_train)
     else:
-        dataloader = data.DataLoader(dataset=dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+        sampler = None
+
+    per_gpu_batch = args.batch_size // args.world_size
+    if is_train:
+        dataloader = torch.utils.data.DataLoader(
+            dataset, batch_size=per_gpu_batch, shuffle=(sampler is None),
+            num_workers=args.num_workers, pin_memory=True, sampler=sampler)
+    else:
+        dataloader = torch.utils.data.DataLoader(
+            dataset, batch_size=per_gpu_batch, shuffle=False,
+            num_workers=args.num_workers, pin_memory=True, sampler=sampler)
 
     return dataloader
