@@ -1,10 +1,7 @@
 import os
-import cv2
 import time
 import datetime
 import argparse
-import numpy as np
-from copy import deepcopy
 
 # ---------------- Torch compoments ----------------
 import torch
@@ -23,11 +20,10 @@ from models import build_model
 from utils import distributed_utils
 from utils.misc import setup_seed
 from utils.misc import load_model, save_model
-from utils.misc import unpatchify, print_rank_0
+from utils.misc import print_rank_0, CollateFunc
 from utils.misc import NativeScalerWithGradNormCount as NativeScaler
 from utils.optimizer import build_optimizer
 from utils.lr_scheduler import LinearWarmUpLrScheduler
-from utils.com_flops_params import FLOPs_and_Params
 
 # ---------------- Training engine ----------------
 from engine_pretrain import train_one_epoch, evaluate
@@ -47,7 +43,7 @@ def parse_args():
                         help='random seed.')
     parser.add_argument('--cuda', action='store_true', default=False,
                         help='use cuda')
-    parser.add_argument('--batch_size', type=int, default=4096,
+    parser.add_argument('--batch_size', type=int, default=256,
                         help='batch size on all GPUs')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='number of workers')
@@ -72,14 +68,14 @@ def parse_args():
     parser.add_argument('--num_classes', type=int, default=None, 
                         help='number of classes.')
     # Model
-    parser.add_argument('--model', type=str, default='vit_t',
-                        help='model name')
+    parser.add_argument('--model', type=str, default='aimv2_t',
+                        help='model name of AIMv2')
     parser.add_argument('--resume', default=None, type=str,
                         help='keep training')
     # Optimizer
     parser.add_argument('-opt', '--optimizer', type=str, default='adamw',
                         help='sgd, adam')
-    parser.add_argument('-wd', '--weight_decay', type=float, default=0.05,
+    parser.add_argument('-wd', '--weight_decay', type=float, default=0.0,
                         help='weight decay')
     parser.add_argument('--base_lr', type=float, default=0.001,
                         help='learning rate for training model')
@@ -180,8 +176,8 @@ def main():
 
 
     # ------------------------- Build Dataloader -------------------------
-    train_dataloader = build_dataloader(args, train_dataset, is_train=True)
-    valid_dataloader = build_dataloader(args, valid_dataset, is_train=False)
+    train_dataloader = build_dataloader(args, train_dataset, is_train=True, collate_fn=CollateFunc())
+    valid_dataloader = build_dataloader(args, valid_dataset, is_train=False, collate_fn=CollateFunc())
     print_rank_0('\n =================== Epoch Information ===================', local_rank)
     print_rank_0(' - Epoch size : {}'.format(len(train_dataloader)), local_rank)
     print_rank_0(' - Train epochs : {}'.format(args.max_epoch), local_rank)
@@ -194,11 +190,6 @@ def main():
     print_rank_0('\n =================== Model Information ===================', local_rank)
     model = build_model(args, model_type='aim')
     model.train().to(device)
-    if local_rank <= 0:
-        FLOPs_and_Params(model=deepcopy(model).eval(), size=args.img_size, pretrain=True)
-    if args.distributed:
-        # wait for all processes to synchronize
-        dist.barrier()
 
 
     # ------------------------- Build DDP Model -------------------------

@@ -38,7 +38,7 @@ class AimEncoder(nn.Module):
                      prefix_causal_mask=True,
                      )
             for _ in range(depth)])
-        self.norm = nn.LayerNorm(patch_embed_dim)
+        self.norm = nn.LayerNorm(patch_embed_dim, eps=1e-6)
         
         self._init_weights()
 
@@ -115,7 +115,7 @@ class AimDecoder(nn.Module):
                  dropout:float = 0.1):
         super().__init__()
         self.in_dim = in_dim
-        self.hidden_dim = round(in_dim * mlp_ratio)
+        self.hidden_dim = max(round(in_dim * mlp_ratio), 2048)
         self.pixel_decoder = nn.Sequential(*[FeedForward(in_dim, self.hidden_dim, dropout) for _ in range(num_blocks)])
         self.pixel_predictor = nn.Linear(in_dim, out_dim)
 
@@ -126,16 +126,38 @@ class AimDecoder(nn.Module):
         return x
 
 
-# ------------------------ MAE Vision Transformer ------------------------
-class ViTforAutoRegression(nn.Module):
+# ------------------------ AutoRegression for Vision Transformer ------------------------
+class AIMv1(nn.Module):
     def __init__(self,
                  encoder :AimEncoder,
                  decoder :AimDecoder,
                  norm_pix_loss :bool = False):
         super().__init__()
-        self.aim_encoder = encoder
-        self.aim_decoder = decoder
+        self.encoder = encoder
+        self.decoder = decoder
         self.norm_pix_loss = norm_pix_loss
+
+        self.initialize_weights()
+
+    def initialize_weights(self):
+        # initialization
+
+        # initialize patch_embed like nn.Linear (instead of nn.Conv2d)
+        w = self.encoder.patch_embed.proj.weight.data
+        torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+
+        # initialize nn.Linear and nn.LayerNorm
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            # we use xavier_uniform following official JAX ViT:
+            torch.nn.init.xavier_uniform_(m.weight)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
 
     def patchify(self, imgs, patch_size):
         """
@@ -151,7 +173,7 @@ class ViTforAutoRegression(nn.Module):
         x = x.reshape(shape=(imgs.shape[0], h * w, p**2 * 3))
 
         return x
-
+    
     def unpatchify(self, x, patch_size):
         """
         x: (B, N, patch_size**2 *3)
@@ -167,10 +189,20 @@ class ViTforAutoRegression(nn.Module):
 
         return imgs
 
-    def compute_loss(self, x, output):
-        # Patchify the image: [bs, 3, h, w] -> [bs, seq_len, c], seq_len = h/p * w/p, c = p*p*3
-        target = self.patchify(x, self.aim_encoder.patch_size)
+    def compute_loss(self, x, output, prefix_mask):
+        """
+            Input:
+                x: torch.Tensor -> [bs, 3, h, w]
+                output['x_pred']: torch.Tensor -> [bs, seq_len, p*p*3]
+                prefix_mask: torch.Tensor -> [bs, seq_len]
+            Output:
+            loss: torch.Tensor
+        """
+        # Patchify the image: [bs, 3, h, w] -> [bs, seq_len, c]
+        target = self.patchify(x, self.encoder.patch_size)
         bs, seq_length = target.shape[:2]
+
+        # normalize patch pixel values
         if self.norm_pix_loss:
             mean = target.mean(dim=-1, keepdim=True)
             var = target.var(dim=-1, keepdim=True)
@@ -178,104 +210,108 @@ class ViTforAutoRegression(nn.Module):
 
         # Shift one position to the left
         pred = output["x_pred"]
-        target = target[:, 1:, :]
-
+        
         # Compute L1 loss
-        norm_factor = (seq_length - 1) * bs
-        loss = (pred[:, :-1, :] - target) ** 2
+        loss = (pred[:, :-1, :] - target[:, 1:, :]) ** 2
+
+        # Keep the losses on the non-prefix tokens
+        non_prefix_mask = (1.0 - prefix_mask.float())[:, 1:]
+        loss = loss * non_prefix_mask.unsqueeze(2)
+
+        # Normalize loss
+        norm_factor = torch.sum(non_prefix_mask)
         loss = loss.mean(dim=-1).sum() / norm_factor
         
         return loss
 
-    def forward(self, x, prefix_mask=None):
-        """
-        Inputs:
-            x: (torch.Tensor) -> [B, C, H, W]. Input image.
-        """
-        # ---------- infer & loss ----------
+    def forward(self, x: torch.Tensor, prefix_mask: torch.Tensor = None):
         imgs = x
-        x = self.aim_encoder(x, prefix_mask)
-        x = self.aim_decoder(x)
+        x = self.encoder(x, prefix_mask)
+        x = self.decoder(x)
         output = {
             'x_pred': x,
         }
 
         if self.training:
-            loss = self.compute_loss(imgs, output)
+            loss = self.compute_loss(imgs, output, prefix_mask)
             output["loss"] = loss
 
         return output
 
 
-# ------------------------ Model Functions ------------------------
-def build_vit_aim(model_name="vit_t", img_size=224, patch_size=16, img_dim=3, norm_pix_loss=False):
-    # ---------------- MAE Encoder ----------------
-    if model_name == "vit_t":
-        encoder = AimEncoder(img_size=img_size,
-                             patch_size=patch_size,
-                             in_chans=img_dim,
-                             patch_embed_dim=192,
-                             depth=12,
-                             num_heads=3,
-                             mlp_ratio=4.0,
+def build_aimv1(model_name: str = "aimv1_t",
+                  img_size: int = 224,
+                  patch_size: int = 16,
+                  img_dim: int = 3,
+                  norm_pix_loss=False,
+                  ):
+    # ---------------- AIM Encoder (ViT) ----------------
+    if model_name == "aimv1_t":
+        encoder = AimEncoder(img_size        = img_size,
+                             patch_size      = patch_size,
+                             in_chans        = img_dim,
+                             patch_embed_dim = 192,
+                             depth           = 12,
+                             num_heads       = 3,
+                             mlp_ratio       = 4.0,
                              )
-    if model_name == "vit_s":
-        encoder = AimEncoder(img_size=img_size,
-                             patch_size=patch_size,
-                             in_chans=img_dim,
-                             patch_embed_dim=384,
-                             depth=12,
-                             num_heads=6,
-                             mlp_ratio=4.0,
+    if model_name == "aimv1_s":
+        encoder = AimEncoder(img_size        = img_size,
+                             patch_size      = patch_size,
+                             in_chans        = img_dim,
+                             patch_embed_dim = 384,
+                             depth           = 12,
+                             num_heads       = 6,
+                             mlp_ratio       = 4.0,
                              )
-    if model_name == "vit_b":
-        encoder = AimEncoder(img_size=img_size,
-                             patch_size=patch_size,
-                             in_chans=img_dim,
-                             patch_embed_dim=768,
-                             depth=12,
-                             num_heads=12,
-                             mlp_ratio=4.0,
+    if model_name == "aimv1_b":
+        encoder = AimEncoder(img_size        = img_size,
+                             patch_size      = patch_size,
+                             in_chans        = img_dim,
+                             patch_embed_dim = 768,
+                             depth           = 12,
+                             num_heads       = 12,
+                             mlp_ratio       = 4.0,
                              )
-    if model_name == "vit_l":
-        encoder = AimEncoder(img_size=img_size,
-                             patch_size=patch_size,
-                             in_chans=img_dim,
-                             patch_embed_dim=1024,
-                             depth=24,
-                             num_heads=16,
-                             mlp_ratio=4.0,
+    if model_name == "aimv1_l":
+        encoder = AimEncoder(img_size        = img_size,
+                             patch_size      = patch_size,
+                             in_chans        = img_dim,
+                             patch_embed_dim = 1024,
+                             depth           = 24,
+                             num_heads       = 16,
+                             mlp_ratio       = 4.0,
                              )
-    if model_name == "vit_h":
-        encoder = AimEncoder(img_size=img_size,
-                             patch_size=patch_size,
-                             in_chans=img_dim,
-                             patch_embed_dim=1280,
-                             depth=32,
-                             num_heads=16,
-                             mlp_ratio=4.0,
+    if model_name == "aimv1_h":
+        encoder = AimEncoder(img_size        = img_size,
+                             patch_size      = patch_size,
+                             in_chans        = img_dim,
+                             patch_embed_dim = 1280,
+                             depth           = 32,
+                             num_heads       = 16,
+                             mlp_ratio       = 4.0,
                              )
     
-    # ---------------- MAE Decoder ----------------
-    decoder = AimDecoder(in_dim=encoder.patch_embed_dim,
-                         out_dim=patch_size**2 * img_dim,
-                         mlp_ratio=4.0,
-                         num_blocks=12,
-                         dropout=0.1,
+    # ---------------- AIM Decoder (MLP) ----------------
+    decoder = AimDecoder(in_dim     = encoder.patch_embed_dim,
+                         out_dim    = patch_size**2 * img_dim,
+                         mlp_ratio  = 4.0,
+                         num_blocks = 12,
+                         dropout    = 0.0,
                          )
     
-    return ViTforAutoRegression(encoder, decoder, norm_pix_loss)
+    return AIMv1(encoder, decoder, norm_pix_loss)
 
 
 if __name__ == '__main__':
-    import torch
     import random
+    import torch
     from thop import profile
 
     print('===============  AIM pipeline  ===============')
     # parameters
     is_train = True
-    batch_size = 4
+    batch_size = 2
     img_size = 224
     patch_size = 16
     num_patches = (img_size // patch_size) ** 2
@@ -295,7 +331,7 @@ if __name__ == '__main__':
     prefix_masks = torch.stack(prefix_masks)
 
     # Build model
-    model = build_vit_aim(patch_size=patch_size)
+    model = build_aimv1(model_name="aimv1_s", patch_size = patch_size, norm_pix_loss=True)
     model.train()
 
     # inference

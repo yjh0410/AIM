@@ -11,16 +11,16 @@ RESUME=$7
 # ------------------- Dataset setting -------------------
 if [[ $DATASET == "cifar10" ]]; then
     IMG_SIZE=32
-    PATCH_SIZE=2
+    PATCH_SIZE=4
     NUM_CLASSES=10
     # Optimizer config
     OPTIMIZER="adamw"
-    BASE_LR=0.00015
-    MIN_LR=0
-    WEIGHT_DECAY=0.05
+    BASE_LR=0.0001
+    MIN_LR=0.00001
+    WEIGHT_DECAY=0.0001
     # Epoch
     MAX_EPOCH=400
-    WP_EPOCH=20
+    WP_EPOCH=40
     EVAL_EPOCH=20
 elif [[ $DATASET == "imagenet_1k" ]]; then
     IMG_SIZE=224
@@ -28,12 +28,12 @@ elif [[ $DATASET == "imagenet_1k" ]]; then
     NUM_CLASSES=1000
     # Optimizer config
     OPTIMIZER="adamw"
-    BASE_LR=0.001
-    MIN_LR=0
-    WEIGHT_DECAY=0.05
+    BASE_LR=0.0001
+    MIN_LR=0.00001
+    WEIGHT_DECAY=0.0001
     # Epoch
     MAX_EPOCH=800
-    WP_EPOCH=20
+    WP_EPOCH=40
     EVAL_EPOCH=20
 else
     echo "Unknown dataset!!"

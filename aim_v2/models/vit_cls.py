@@ -15,15 +15,14 @@ class ViTForImageClassification(nn.Module):
                  ):
         super().__init__()
         # -------- Model parameters --------
-        self.encoder    = image_encoder
+        self.encoder = image_encoder
         self.classifier = AttentionPoolingClassifier(
-            image_encoder.patch_embed_dim,
+            image_encoder.embed_dim,
             num_classes,
             image_encoder.num_heads,
             True,
             num_queries=1,
             )
-
 
     def forward(self, x):
         """

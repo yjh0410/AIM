@@ -2,6 +2,7 @@ import sys
 import math
 import torch
 
+from utils import distributed_utils
 from utils.misc import MetricLogger, SmoothedValue
 from utils.misc import print_rank_0, all_reduce_mean
 
@@ -25,7 +26,7 @@ def train_one_epoch(args,
     epoch_size = len(data_loader)
 
     # train one epoch
-    for iter_i, (images, _, prefix_masks) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+    for iter_i, (images, prefix_masks, token_ids, token_masks, _) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         ni = iter_i + epoch * epoch_size
         nw = args.wp_epoch * epoch_size
 
@@ -39,18 +40,15 @@ def train_one_epoch(args,
         # To device
         images = images.to(device, non_blocking=True)
         prefix_masks = prefix_masks.to(device, non_blocking=True)
+        token_ids = token_ids.to(device, non_blocking=True)
+        token_masks = token_masks.to(device, non_blocking=True)
 
         # Inference
         with torch.cuda.amp.autocast():
             ## forward
-            output = model(images, prefix_masks)
-            loss = output["loss"]
-
-        # Check loss
-        loss_value = loss.item()
-        if not math.isfinite(loss_value):
-            print(" ! Loss is {}, stopping training".format(loss_value))
-            sys.exit(1)
+            loss_dict = model(images, token_ids, prefix_masks, token_masks)
+            loss = loss_dict["loss"]
+            loss_dict_reduced = distributed_utils.reduce_dict(loss_dict)
 
         # Backward & Optimize
         loss_scaler(loss, optimizer, parameters=model.parameters())
@@ -61,8 +59,14 @@ def train_one_epoch(args,
 
         # Logs
         lr = optimizer.param_groups[0]["lr"]
-        metric_logger.update(loss=loss_value)
+        metric_logger.update(**loss_dict_reduced)
         metric_logger.update(lr=lr)
+
+        # Check loss
+        loss_value = loss.item()
+        if not math.isfinite(loss_value):
+            print(" ! Loss is {}, stopping training".format(loss_value))
+            sys.exit(1)
 
         loss_value_reduce = all_reduce_mean(loss_value)
         if tblogger is not None and (iter_i + 1) % args.grad_accumulate == 0:
@@ -93,21 +97,20 @@ def evaluate(data_loader, model, device, local_rank):
 
     for batch in metric_logger.log_every(data_loader, 10, header):
         images = batch[0]
-        prefix_masks = batch[2]
+        prefix_masks = batch[1]
+        token_ids = batch[2]
+        token_masks = batch[3]
 
         images = images.to(device, non_blocking=True)
         prefix_masks = prefix_masks.to(device, non_blocking=True)
+        token_ids = token_ids.to(device, non_blocking=True)
+        token_masks = token_masks.to(device, non_blocking=True)
 
         # compute output
         with torch.cuda.amp.autocast():
-            output = model(images, prefix_masks)
+            loss_dict = model(images, token_ids, prefix_masks, token_masks, compute_loss=True)
 
-            if type(model) in (torch.nn.parallel.DataParallel, torch.nn.parallel.DistributedDataParallel):
-                loss = model.module.compute_loss(images, output, prefix_masks)
-            else:
-                loss = model.compute_loss(images, output, prefix_masks)
-
-        metric_logger.update(loss=loss.item())
+        metric_logger.update(**loss_dict)
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()

@@ -20,7 +20,7 @@ def build_dataset(args, transform=None, is_train=False):
         print("Unknown dataset: {}".format(args.dataset))
     
 
-def build_dataloader(args, dataset, is_train=False):
+def build_dataloader(args, dataset, is_train=False, collate_fn=None):
     if is_train:
         sampler = torch.utils.data.DistributedSampler(
             dataset, num_replicas=args.world_size, rank=args.global_rank, shuffle=True, seed=args.seed,
@@ -32,6 +32,7 @@ def build_dataloader(args, dataset, is_train=False):
             num_workers = args.num_workers,
             pin_memory  = True,
             drop_last   = True,
+            collate_fn  = collate_fn,
         )
 
     else:
@@ -44,7 +45,8 @@ def build_dataloader(args, dataset, is_train=False):
             batch_size  = args.batch_size // args.world_size,
             num_workers = args.num_workers,
             pin_memory  = False,
-            drop_last   = False
+            drop_last   = False,
+            collate_fn  = collate_fn,
         )
 
 

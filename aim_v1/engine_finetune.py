@@ -12,8 +12,9 @@ def train_one_epoch(args,
                     device,
                     model,
                     data_loader,
-                    optimizer,
                     epoch,
+                    optimizer,
+                    lr_scheduler,
                     lr_scheduler_warmup,
                     loss_scaler,
                     criterion,
@@ -32,7 +33,8 @@ def train_one_epoch(args,
     # train one epoch
     for iter_i, (images, targets, _) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         ni = iter_i + epoch * epoch_size
-        nw = args.wp_epoch * epoch_size
+        nw = lr_scheduler_warmup.wp_iter
+        
         # Warmup
         if nw > 0 and ni < nw:
             lr_scheduler_warmup(ni, optimizer)
@@ -77,13 +79,17 @@ def train_one_epoch(args,
         metric_logger.update(lr=lr)
 
         loss_value_reduce = all_reduce_mean(loss_value)
-        if tblogger is not None and (iter_i + 1) % args.grad_accumulate == 0:
+        if tblogger is not None:
             """ We use epoch_1000x as the x-axis in tensorboard.
             This calibrates different curves when batch size changes.
             """
             epoch_1000x = int((iter_i / len(data_loader) + epoch) * 1000)
             tblogger.add_scalar('loss', loss_value_reduce, epoch_1000x)
             tblogger.add_scalar('lr', lr, epoch_1000x)
+
+        # perform per iteration lr schedule
+        if ni > nw:
+            lr_scheduler.step()
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()

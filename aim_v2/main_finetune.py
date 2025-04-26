@@ -24,7 +24,7 @@ from models import build_model
 # ---------------- Utils compoments ----------------
 from utils import lr_decay
 from utils import distributed_utils
-from utils.misc import setup_seed, print_rank_0, load_model, save_model
+from utils.misc import setup_seed, print_rank_0, load_model, save_model, CollateFunc
 from utils.misc import NativeScalerWithGradNormCount as NativeScaler
 from utils.lr_scheduler import LinearWarmUpLrScheduler
 from utils.com_flops_params import FLOPs_and_Params
@@ -73,7 +73,7 @@ def parse_args():
     parser.add_argument('--num_classes', type=int, default=None, 
                         help='number of classes.')
     # Model
-    parser.add_argument('--model', type=str, default='vit_tiny',
+    parser.add_argument('--model', type=str, default='vit_t',
                         help='model name')
     parser.add_argument('--pretrained', default=None, type=str,
                         help='load pretrained weight.')
@@ -81,8 +81,6 @@ def parse_args():
                         help='keep training')
     parser.add_argument('--ema', action='store_true', default=False,
                         help='use ema.')
-    parser.add_argument('--learnable_pos', action='store_true', default=False,
-                        help='learnable position embedding.')
     parser.add_argument('--drop_path', type=float, default=0.1,
                         help='drop_path')
     # Optimizer
@@ -204,8 +202,8 @@ def main():
 
 
     # ------------------------- Build Dataloader -------------------------
-    train_dataloader = build_dataloader(args, train_dataset, is_train=True)
-    val_dataloader   = build_dataloader(args, val_dataset,   is_train=False)
+    train_dataloader = build_dataloader(args, train_dataset, is_train=True, collate_fn=CollateFunc())
+    val_dataloader   = build_dataloader(args, val_dataset,   is_train=False, collate_fn=CollateFunc())
 
     print('=================== Dataset Information ===================')
     print('Train dataset size : ', len(train_dataset))

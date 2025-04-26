@@ -202,6 +202,45 @@ class MetricLogger(object):
         print('{} Total time: {} ({:.4f} s / it)'.format(
             header, total_time_str, total_time / len(iterable)))
 
+class CollateFunc(object):
+    def __call__(self, batch):
+        images       = []
+        token_ids    = []
+        token_masks  = []
+        prefix_masks = []
+        cls_idxs     = []
+
+        # Collect batch data
+        for sample in batch:
+            image        = sample[0]
+            token_id     = sample[1]
+            token_mask   = sample[2]
+            prefix_mask  = sample[3]
+            cls_idx      = sample[4]
+            pad_token_id = sample[5]
+
+            images.append(image)
+            token_ids.append(token_id)
+            token_masks.append(token_mask)
+            prefix_masks.append(prefix_mask)
+            cls_idxs.append(cls_idx)
+
+        # Handling unequal token lengths
+        bs = len(batch)
+        max_seq_len = max([len(seq) for seq in token_ids])
+        pad_token_ids = torch.ones([bs, max_seq_len], dtype=torch.long) * pad_token_id
+        pad_token_masks = torch.zeros([bs, max_seq_len], dtype=torch.bool)
+        for bi in range(bs):
+            seq_len = len(token_ids[bi])
+            pad_token_ids[bi, :seq_len] = torch.as_tensor(token_ids[bi]).long()
+            pad_token_masks[bi, :seq_len] = torch.as_tensor(token_masks[bi]).bool()
+
+        images = torch.stack(images, dim=0)              # [bs, 3, h, w]
+        cls_idxs = torch.as_tensor(cls_idxs)             # [bs,]
+        prefix_masks = torch.stack(prefix_masks, dim=0)  # [bs, img_seq_len]
+        
+        return images, prefix_masks, pad_token_ids, pad_token_masks, cls_idxs
+
 
 # ---------------------- Optimize functions ----------------------
 def get_grad_norm_(parameters, norm_type: float = 2.0) -> torch.Tensor:

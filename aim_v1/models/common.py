@@ -1,35 +1,51 @@
+# --------------------------------------------------------------------
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+# --------------------------------------------------------------------
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
 # ----------------------- Basic modules -----------------------
-class RMSNorm(torch.nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def _norm(self, x):
-        # y = x / sqrt(E[x^2] + eps)
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-
-    def forward(self, x):
-        output = self._norm(x.float()).type_as(x)
-        return output * self.weight
+def scaled_dot_product_attention(query, key, value, attn_mask=None):
+    """
+    :param query: Query 向量 (batch_size, n_heads, seq_len, d_k)
+    :param key: Key 向量 (batch_size, n_heads, seq_len, d_k)
+    :param value: Value 向量 (batch_size, n_heads, seq_len, d_v)
+    :param attn_mask: 注意力掩码 (batch_size, n_heads, seq_len, seq_len)
+    :return: 输出向量 (batch_size, n_heads, seq_len, d_v)
+    """
+    scores = torch.matmul(query, key.transpose(-2, -1))  # (batch_size, n_heads, seq_len, seq_len)
     
+    dk = torch.tensor(key.size(-1), dtype=torch.float32)  # d_k
+    scores = scores / torch.sqrt(dk)  # 缩放点积
+    
+    if attn_mask is not None:
+        attn_mask_ = attn_mask[:, :, :scores.shape[-2], :scores.shape[-1]]
+        scores = scores.masked_fill(attn_mask_ == 0, float('-inf'))
+    attn_weights = F.softmax(scores, dim=-1)  # (batch_size, n_heads, seq_len, seq_len)
+    
+    output = torch.matmul(attn_weights, value)  # (batch_size, n_heads, seq_len, d_v)
+    
+    return output
+
 class FeedForward(nn.Module):
     def __init__(self,
-                 embedding_dim: int,
+                 d_model: int,
                  mlp_dim: int,
                  dropout: float = 0.0,
                  ) -> None:
         super().__init__()
-        self.fc1   = nn.Linear(embedding_dim, mlp_dim)
+        self.fc1   = nn.Linear(d_model, mlp_dim)
         self.drop1 = nn.Dropout(dropout)
-        self.fc2   = nn.Linear(mlp_dim, embedding_dim)
+        self.fc2   = nn.Linear(mlp_dim, d_model)
         self.drop2 = nn.Dropout(dropout)
-        self.act   = nn.SiLU(inplace=True)
+        self.act   = nn.GELU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.fc1(x)
@@ -60,8 +76,8 @@ class Attention(nn.Module):
 
         # --------------- Network parameters ---------------
         self.qkv = nn.Linear(dim, dim*3, bias = qkv_bias)
-        self.q_norm = RMSNorm(self.head_dim) if qk_norm else nn.Identity()
-        self.k_norm = RMSNorm(self.head_dim) if qk_norm else nn.Identity()
+        self.q_norm = nn.LayerNorm(self.head_dim, eps=1e-6) if qk_norm else nn.Identity()
+        self.k_norm = nn.LayerNorm(self.head_dim, eps=1e-6) if qk_norm else nn.Identity()
         
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
@@ -95,13 +111,13 @@ class Attention(nn.Module):
         qkv = self.qkv(x)
         q, k, v = torch.chunk(qkv, 3, dim=-1)
 
-        ## [B, N, C] -> [B, N, H, C_h] -> [B, H, N, C_h]
+        ## [bs, seq_len, c] -> [bs, seq_len, nh, dh] -> [bs, nh, seq_len, dh], c = nh x dh
         q = q.view(bs, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3).contiguous()
         k = k.view(bs, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3).contiguous()
         v = v.view(bs, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3).contiguous()
 
         # ----------------- Multi-head Attn -----------------
-        x = self.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        x = scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
 
         # ----------------- Output -----------------
         x = x.permute(0, 2, 1, 3).contiguous().view(bs, seq_len, -1)
@@ -109,28 +125,6 @@ class Attention(nn.Module):
         x = self.proj_drop(x)
 
         return x
-
-    def scaled_dot_product_attention(self, query, key, value, attn_mask=None):
-        """
-        :param query: Query 向量 (batch_size, n_heads, seq_len, d_k)
-        :param key: Key 向量 (batch_size, n_heads, seq_len, d_k)
-        :param value: Value 向量 (batch_size, n_heads, seq_len, d_v)
-        :param attn_mask: 注意力掩码 (batch_size, n_heads, seq_len, seq_len)
-        :return: 输出向量 (batch_size, n_heads, seq_len, d_v)
-        """
-        scores = torch.matmul(query, key.transpose(-2, -1))  # (batch_size, n_heads, seq_len, seq_len)
-        
-        dk = torch.tensor(key.size(-1), dtype=torch.float32)  # d_k
-        scores = scores / torch.sqrt(dk)  # 缩放点积
-        
-        if attn_mask is not None:
-            attn_mask_ = attn_mask[:, :, :scores.shape[-2], :scores.shape[-1]]
-            scores = scores.masked_fill(attn_mask_ == 0, float('-inf'))
-        attn_weights = F.softmax(scores, dim=-1)  # (batch_size, n_heads, seq_len, seq_len)
-        
-        output = torch.matmul(attn_weights, value)  # (batch_size, n_heads, seq_len, d_v)
-        
-        return output
 
 class DropPath(nn.Module):
     """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks).
@@ -173,7 +167,7 @@ class ViTBlock(nn.Module):
                  num_heads :int,
                  mlp_ratio :float = 4.0,
                  qkv_bias  :bool  = False,
-                 qk_norm  :bool  = False,
+                 qk_norm   :bool  = False,
                  proj_drop :float = 0.,
                  attn_drop :float = 0.,
                  drop_path :float = 0.,
@@ -181,7 +175,7 @@ class ViTBlock(nn.Module):
                  ) -> None:
         super().__init__()
         # -------------- Model parameters --------------
-        self.norm1 = RMSNorm(dim)
+        self.norm1 = nn.LayerNorm(dim, eps=1e-6)
         self.attn  = Attention(dim       = dim,
                                qkv_bias  = qkv_bias,
                                qk_norm   = qk_norm,
@@ -192,10 +186,10 @@ class ViTBlock(nn.Module):
                                )
         self.drop_path1 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         
-        self.norm2 = RMSNorm(dim)
-        self.mlp   = FeedForward(embedding_dim=dim,
-                                 mlp_dim=int(dim * mlp_ratio),
-                                 dropout=proj_drop,
+        self.norm2 = nn.LayerNorm(dim, eps=1e-6)
+        self.mlp   = FeedForward(d_model = dim,
+                                 mlp_dim = int(dim * mlp_ratio),
+                                 dropout = proj_drop,
                                  )
         self.drop_path2 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
@@ -224,7 +218,7 @@ class PatchEmbed(nn.Module):
         return self.proj(x)
 
 
-# ----------------------- classifier modules -----------------------
+# ----------------------- Classifier modules -----------------------
 class AttentionPoolingClassifier(nn.Module):
     def __init__(
         self,
