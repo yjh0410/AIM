@@ -26,38 +26,47 @@ def train_one_epoch(args,
     epoch_size = len(data_loader)
 
     # train one epoch
-    for iter_i, (images, prefix_masks, token_ids, token_masks, _) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
-        ni = iter_i + epoch * epoch_size
-        nw = args.wp_epoch * epoch_size
+    for iter_i, samples in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+        global_steps = iter_i + epoch * epoch_size
+        nw = args.wp_epoch * epoch_size // args.update_freq
 
         # Warmup
-        if nw > 0 and ni < nw:
-            lr_scheduler_warmup(ni, optimizer)
-        elif ni == nw:
+        if nw > 0 and global_steps // args.update_freq < nw and global_steps % args.update_freq == 0:
+            lr_scheduler_warmup(global_steps // args.update_freq, optimizer)
+        elif global_steps // args.update_freq == nw:
             print(" ! Warmup stage is over.")
             lr_scheduler_warmup.set_lr(optimizer, args.base_lr)
 
         # To device
-        images = images.to(device, non_blocking=True)
-        prefix_masks = prefix_masks.to(device, non_blocking=True)
-        token_ids = token_ids.to(device, non_blocking=True)
-        token_masks = token_masks.to(device, non_blocking=True)
+        images = samples["images"].to(device, non_blocking=True)
+        image_prefix_masks = samples["image_prefix_masks"].to(device, non_blocking=True)
+        input_ids = samples["input_ids"].to(device, non_blocking=True)
+        attention_masks = samples["attention_masks"].to(device, non_blocking=True)
 
         # Inference
-        with torch.cuda.amp.autocast():
+        with torch.autocast(device_type=device.type, dtype=torch.float16):
             ## forward
-            loss_dict = model(images, token_ids, prefix_masks, token_masks)
+            loss_dict = model(
+                images = images,
+                image_prefix_masks = image_prefix_masks,
+                input_ids = input_ids,
+                attention_mask = attention_masks,
+                )
             loss = loss_dict["loss"]
-            loss_dict_reduced = distributed_utils.reduce_dict(loss_dict)
+            loss /= args.update_freq
+
 
         # Backward & Optimize
-        loss_scaler(loss, optimizer, parameters=model.parameters())
-        optimizer.zero_grad()
+        update_grad = (global_steps % args.update_freq == 0)
+        loss_scaler(loss, optimizer, parameters=model.parameters(), update_grad=update_grad)
+        if update_grad:
+            optimizer.zero_grad()
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
         # Logs
+        loss_dict_reduced = distributed_utils.reduce_dict(loss_dict)
         lr = optimizer.param_groups[0]["lr"]
         metric_logger.update(**loss_dict_reduced)
         metric_logger.update(lr=lr)
@@ -78,9 +87,9 @@ def train_one_epoch(args,
             tblogger.add_scalar('lr', lr, epoch_1000x)
 
         # perform per iteration lr schedule
-        if ni > nw:
+        if global_steps // args.update_freq > nw and update_grad:
             lr_scheduler.step()
-
+        
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print_rank_0(" - Averaged stats: {}".format(metric_logger), local_rank)
@@ -95,20 +104,22 @@ def evaluate(data_loader, model, device, local_rank):
     # switch to evaluation mode
     model.eval()
 
-    for batch in metric_logger.log_every(data_loader, 10, header):
-        images = batch[0]
-        prefix_masks = batch[1]
-        token_ids = batch[2]
-        token_masks = batch[3]
-
-        images = images.to(device, non_blocking=True)
-        prefix_masks = prefix_masks.to(device, non_blocking=True)
-        token_ids = token_ids.to(device, non_blocking=True)
-        token_masks = token_masks.to(device, non_blocking=True)
+    for samples in metric_logger.log_every(data_loader, 10, header):
+        # To device
+        images = samples["images"].to(device, non_blocking=True)
+        image_prefix_masks = samples["image_prefix_masks"].to(device, non_blocking=True)
+        input_ids = samples["input_ids"].to(device, non_blocking=True)
+        attention_masks = samples["attention_masks"].to(device, non_blocking=True)
 
         # compute output
-        with torch.cuda.amp.autocast():
-            loss_dict = model(images, token_ids, prefix_masks, token_masks, compute_loss=True)
+        with torch.autocast(device_type=device.type, dtype=torch.float16):
+            loss_dict = model(
+                images = images,
+                image_prefix_masks = image_prefix_masks,
+                input_ids = input_ids,
+                attention_mask = attention_masks,
+                compute_loss = True
+                )
 
         metric_logger.update(**loss_dict)
 

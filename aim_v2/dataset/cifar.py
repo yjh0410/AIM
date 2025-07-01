@@ -14,13 +14,21 @@ from tokenizer import load_hf_tokenizer
 
 
 class CifarDataset(data.Dataset):
-    def __init__(self, args, is_train=False, transform=None):
+    def __init__(self,
+                 img_size: int = 32,
+                 patch_size: int = 4,
+                 is_train = False,
+                 max_length = 512,
+                 transform = None,
+                 ):
         super().__init__()
         # ----------------- basic parameters -----------------
-        self.pixel_mean = [0.0, 0.0, 0.0]
-        self.pixel_std =  [1.0, 1.0, 1.0]
         self.is_train  = is_train
-        self.num_patches = (args.img_size // args.patch_size) ** 2
+        self.num_patches = (img_size // patch_size) ** 2
+        self.max_length = max_length
+
+        assert max_length > self.num_patches
+
         self.cifar10_classes = [
             "airplane",
             "automobile",
@@ -59,12 +67,18 @@ class CifarDataset(data.Dataset):
 
         # create a text
         text = "A photo of the {}.".format(self.cifar10_classes[cls_idx])
-        token_ids = self.tokenizer.encode(text) + [self.tokenizer.eos_token_id]
-        token_mask = np.ones_like(token_ids, dtype=np.int8).tolist()
+        input_ids = self.tokenizer.encode(text) + [self.tokenizer.eos_token_id]
 
-        pad_token_id = self.tokenizer.pad_token_id
+        assert self.max_length >= self.num_patches + len(input_ids)
 
-        return image, token_ids, token_mask, prefix_mask, cls_idx, pad_token_id
+        # prepare attention mask
+        attention_mask = np.zeros(self.max_length, dtype=np.float32)
+        attention_mask[:self.num_patches + len(input_ids)] = 1.0
+
+        # pad the input token ids
+        input_ids += [self.tokenizer.pad_token_id] * (self.max_length - self.num_patches - len(input_ids))
+
+        return image, input_ids, attention_mask, prefix_mask, cls_idx
     
     def pull_image(self, index):
         # laod data
@@ -72,7 +86,7 @@ class CifarDataset(data.Dataset):
 
         # convert image tensor into image numpy
         image = image.permute(1, 2, 0).numpy()
-        image = (image * self.pixel_std + self.pixel_mean) * 255.
+        image = image * 255.
         image = np.clip(image, 0., 255.).astype(np.uint8)
         image = image.copy()
 
@@ -80,9 +94,9 @@ class CifarDataset(data.Dataset):
 
     def build_transform(self):
         if self.is_train:
-            transforms = T.Compose([T.ToTensor(), T.Normalize(self.pixel_mean, self.pixel_std)])
+            transforms = T.Compose([T.ToTensor()])
         else:
-            transforms = T.Compose([T.ToTensor(), T.Normalize(self.pixel_mean, self.pixel_std)])
+            transforms = T.Compose([T.ToTensor()])
 
         return transforms
 
@@ -103,19 +117,24 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # dataset
-    dataset = CifarDataset(args, is_train=args.is_train)  
+    dataset = CifarDataset(
+        img_size = 32,
+        patch_size = 8,
+        is_train = True,
+        max_length = 24,
+        )  
     print('Dataset size: ', len(dataset))
 
     for i in range(len(dataset)):
-        image, token_ids, token_mask, prefix_mask, cls_idx, pad_token_id = dataset[i]
-        text = dataset.tokenizer.decode(token_ids)
+        image, input_ids, attention_mask, prefix_mask, cls_idx = dataset[i]
+        text = dataset.tokenizer.decode(input_ids)
 
-        print(" - token ids: ", token_ids)
+        print(" - token ids: ", input_ids)
         print(" - decoded texts ids: ", text)
 
         # convert image tensor into image numpy
         image = image.permute(1, 2, 0).numpy()
-        image = (image * dataset.pixel_std + dataset.pixel_mean) * 255.
+        image = image * 255.
         image = np.clip(image, 0., 255.).astype(np.uint8)
         image = image.copy()
 

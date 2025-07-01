@@ -1,7 +1,7 @@
 import torch
 
 
-def build_optimizer(model, base_lr, weight_decay):
+def build_optimizer(model, base_lr, weight_decay=1e-4):
     # ------------- Divide model's parameters -------------
     param_dicts = [], [], []
     norm_names = ["norm"] + ["norm{}".format(i) for i in range(10000)]

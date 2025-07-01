@@ -1,21 +1,21 @@
 import torch.nn as nn
 
 try:
-    from .vit    import ImageEncoderViT
+    from .vision_transformer import VisionTransformer
     from .common import AttentionPoolingClassifier
 except:
-    from  vit    import ImageEncoderViT
+    from  vision_transformer import VisionTransformer
     from  common import AttentionPoolingClassifier
 
 
 class ViTForImageClassification(nn.Module):
     def __init__(self,
-                 image_encoder :ImageEncoderViT,
-                 num_classes   :int   = 1000,
+                 image_encoder :VisionTransformer,
+                 num_classes   :int = 1000,
                  ):
         super().__init__()
         # -------- Model parameters --------
-        self.encoder = image_encoder
+        self.vis_encoder = image_encoder
         self.classifier = AttentionPoolingClassifier(
             image_encoder.embed_dim,
             num_classes,
@@ -29,7 +29,7 @@ class ViTForImageClassification(nn.Module):
         Inputs:
             x: (torch.Tensor) -> [B, C, H, W]. Input image.
         """
-        x = self.encoder(x)
+        x = self.vis_encoder(x)
         x, x_cls = self.classifier(x)
 
         return x
@@ -45,15 +45,15 @@ if __name__ == '__main__':
     patch_size = 16
 
     # Build model
-    encoder = ImageEncoderViT(img_size=224,
-                               patch_size=patch_size,
-                               in_chans=3,
-                               patch_embed_dim=384,
-                               depth=12,
-                               num_heads=3,
-                               mlp_ratio=4.0,
-                               drop_path_rate=0.1,
-                               )
+    encoder = VisionTransformer(img_size=224,
+                                patch_size=patch_size,
+                                in_chans=3,
+                                patch_embed_dim=384,
+                                depth=12,
+                                num_heads=3,
+                                mlp_ratio=4.0,
+                                drop_path_rate=0.1,
+                                )
     model = ViTForImageClassification(encoder, num_classes=1000)
 
     # Inference

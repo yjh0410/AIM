@@ -20,6 +20,7 @@ from dataset import build_dataset, build_dataloader
 
 # ---------------- Model compoments ----------------
 from models import build_model
+from models.config import build_config
 
 # ---------------- Utils compoments ----------------
 from utils import lr_decay
@@ -35,28 +36,19 @@ from engine_finetune import train_one_epoch, evaluate
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    # Basic
+    # Basic settings
     parser.add_argument('--seed', type=int, default=42,
                         help='random seed.')
-    parser.add_argument('--img_size', type=int, default=224,
-                        help='input image size.')    
-    parser.add_argument('--img_dim', type=int, default=3,
-                        help='3 for RGB; 1 for Gray.')    
-    parser.add_argument('--patch_size', type=int, default=16,
-                        help='patch_size.')    
     parser.add_argument('--cuda', action='store_true', default=False,
                         help='use cuda')
-    parser.add_argument('--batch_size', type=int, default=256,
-                        help='batch size on all GPUs')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='number of workers')
-    parser.add_argument('--path_to_save', type=str, default='weights/',
-                        help='path to save trained model.')
     parser.add_argument('--tfboard', action='store_true', default=False,
                         help='use tensorboard')
     parser.add_argument('--eval', action='store_true', default=False,
                         help='evaluate model.')
-    # Epoch
+        
+    # Epoch settings
     parser.add_argument('--wp_epoch', type=int, default=5, 
                         help='warmup epoch for finetune with MAE pretrained')
     parser.add_argument('--start_epoch', type=int, default=0, 
@@ -65,15 +57,17 @@ def parse_args():
                         help='max epoch')
     parser.add_argument('--eval_epoch', type=int, default=5, 
                         help='max epoch')
-    # Dataset
+    
+    # Dataset settings
     parser.add_argument('--dataset', type=str, default='cifar10',
                         help='dataset name')
     parser.add_argument('--root', type=str, default='/mnt/share/ssd2/dataset',
                         help='path to dataset folder')
     parser.add_argument('--num_classes', type=int, default=None, 
                         help='number of classes.')
-    # Model
-    parser.add_argument('--model', type=str, default='vit_t',
+    
+    # Model settings
+    parser.add_argument('--model', type=str, default='vit_tiny',
                         help='model name')
     parser.add_argument('--pretrained', default=None, type=str,
                         help='load pretrained weight.')
@@ -83,11 +77,10 @@ def parse_args():
                         help='use ema.')
     parser.add_argument('--drop_path', type=float, default=0.1,
                         help='drop_path')
-    # Optimizer
-    parser.add_argument('-opt', '--optimizer', type=str, default='adamw',
-                        help='sgd, adam')
-    parser.add_argument('-wd', '--weight_decay', type=float, default=0.05,
-                        help='weight decay')
+    
+    # Optimizer settings
+    parser.add_argument('--batch_size', type=int, default=256,
+                        help='batch size on all GPUs')
     parser.add_argument('--base_lr', type=float, default=1e-3,
                         help='learning rate for training model')
     parser.add_argument('--min_lr', type=float, default=0.0,
@@ -96,6 +89,9 @@ def parse_args():
                         help='layer-wise lr decay from ELECTRA/BEiT')
     parser.add_argument('--max_grad_norm', type=float, default=None,
                         help='Clip gradient norm (default: None, no clipping)')
+    parser.add_argument('--update_freq', type=int, default=2,
+                        help='batch size per gpu')
+
     # Augmentation parameters
     parser.add_argument('--color_jitter', type=float, default=None, metavar='PCT',
                         help='Color jitter factor (enabled only when not using Auto/RandAug)')
@@ -103,6 +99,7 @@ def parse_args():
                         help='Use AutoAugment policy. "v0" or "original". " + "(default: rand-m9-mstd0.5-inc1)'),
     parser.add_argument('--smoothing', type=float, default=0.1,
                         help='Label smoothing (default: 0.1)')
+    
     # Random Erase params
     parser.add_argument('--reprob', type=float, default=0.25, metavar='PCT',
                         help='Random erase prob (default: 0.25)')
@@ -112,6 +109,7 @@ def parse_args():
                         help='Random erase count (default: 1)')
     parser.add_argument('--resplit', action='store_true', default=False,
                         help='Do not random erase first (clean) augmentation split')
+    
     # Mixup params
     parser.add_argument('--mixup', type=float, default=0,
                         help='mixup alpha, mixup enabled if > 0.')
@@ -125,6 +123,7 @@ def parse_args():
                         help='Probability of switching to cutmix when both mixup and cutmix enabled')
     parser.add_argument('--mixup_mode', type=str, default='batch',
                         help='How to apply mixup/cutmix params. Per "batch", "pair", or "elem"')
+    
     # DDP
     parser.add_argument('--distributed', action='store_true', default=False,
                         help='distributed training')
@@ -145,10 +144,6 @@ def main():
     # set random seed
     setup_seed(args.seed)
 
-    # Path to save model
-    path_to_save = os.path.join(args.path_to_save, args.dataset, "finetune", args.model)
-    os.makedirs(path_to_save, exist_ok=True)
-    args.output_dir = path_to_save
     
     # ------------------------- Build DDP environment -------------------------
     ## LOCAL_RANK is the global GPU number tag, the value range is [0, world_size - 1].
@@ -173,15 +168,12 @@ def main():
 
 
     # ------------------------- Build CUDA -------------------------
-    if args.cuda:
-        if torch.cuda.is_available():
-            cudnn.benchmark = True
-            device = torch.device("cuda")
-        else:
-            print('There is no available GPU.')
-            args.cuda = False
-            device = torch.device("cpu")
+    if torch.cuda.is_available():
+        cudnn.benchmark = True
+        device = torch.device("cuda")
     else:
+        print('There is no available GPU.')
+        args.cuda = False
         device = torch.device("cpu")
 
 
@@ -196,18 +188,44 @@ def main():
         tblogger = SummaryWriter(log_path)
 
 
+    # ------------------------- Build Model config -------------------------
+    model_cfg = build_config(args.model)
+    model_cfg.vit_is_causal = False
+
+
     # ------------------------- Build Dataset -------------------------
-    train_dataset = build_dataset(args, is_train=True)
-    val_dataset   = build_dataset(args, is_train=False)
+    if 'cifar' in args.dataset:
+        model_cfg.vit_img_size   = 32
+        model_cfg.vit_patch_size = 8
+
+    train_dataset = build_dataset(
+        args = args,
+        img_size = model_cfg.vit_img_size,
+        patch_size = model_cfg.vit_patch_size,
+        max_length = model_cfg.lm_max_length,
+        is_train = True,
+        )
+    valid_dataset = build_dataset(
+        args,
+        img_size = model_cfg.vit_img_size,
+        patch_size = model_cfg.vit_patch_size,
+        max_length = model_cfg.lm_max_length,
+        is_train = False,
+        )
+    print_rank_0('\n =================== Dataset Information ===================', local_rank)
+    print_rank_0(' - Train dataset size : {}'.format(len(train_dataset)), local_rank)
+    print_rank_0(' - Valid dataset size : {}'.format(len(valid_dataset)), local_rank)
 
 
     # ------------------------- Build Dataloader -------------------------
     train_dataloader = build_dataloader(args, train_dataset, is_train=True, collate_fn=CollateFunc())
-    val_dataloader   = build_dataloader(args, val_dataset,   is_train=False, collate_fn=CollateFunc())
-
-    print('=================== Dataset Information ===================')
-    print('Train dataset size : ', len(train_dataset))
-    print('Val dataset size   : ', len(val_dataset))
+    valid_dataloader = build_dataloader(args, valid_dataset, is_train=False, collate_fn=CollateFunc())
+    print_rank_0('\n =================== Epoch Information ===================', local_rank)
+    print_rank_0(' - Epoch size : {}'.format(len(train_dataloader)), local_rank)
+    print_rank_0(' - Train epochs : {}'.format(args.max_epoch), local_rank)
+    print_rank_0(' - Train iterations : {}'.format(args.max_epoch * len(train_dataloader)), local_rank)
+    print_rank_0(' - Warmup epochs : {}'.format(args.wp_epoch), local_rank)
+    print_rank_0(' - Warmup iterations : {}'.format(args.wp_epoch * len(train_dataloader)), local_rank)
 
 
     # ------------------------- Mixup augmentation config -------------------------
@@ -226,11 +244,11 @@ def main():
 
 
     # ------------------------- Build Model -------------------------
-    model = build_model(args, model_type='cls')
+    model = build_model(args, model_cfg, model_type='cls')
     model.train().to(device)
     print(model)
     if local_rank <= 0:
-        FLOPs_and_Params(model=deepcopy(model).eval(), size=args.img_size)
+        FLOPs_and_Params(model=deepcopy(model).eval(), size=model_cfg.vit_img_size)
     if args.distributed:
         # wait for all processes to synchronize
         dist.barrier()
@@ -244,7 +262,7 @@ def main():
 
 
     # ------------------------- Build Optimzier -------------------------
-    param_groups = lr_decay.param_groups_lrd(model_without_ddp, args.weight_decay, [], args.layer_decay)
+    param_groups = lr_decay.param_groups_lrd(model_without_ddp, 0.05, [], args.layer_decay)
     optimizer = torch.optim.AdamW(param_groups, lr=args.base_lr)
     loss_scaler = NativeScaler()
     print(' - Base lr: ', args.base_lr)
@@ -271,10 +289,15 @@ def main():
     # ------------------------- Eval before Train Pipeline -------------------------
     if args.eval:
         print('evaluating ...')
-        test_stats = evaluate(val_dataloader, model, device, local_rank)
+        test_stats = evaluate(valid_dataloader, model, device, local_rank)
         print('Eval Results: [loss: %.2f][acc1: %.2f][acc5 : %.2f]' %
                 (test_stats['loss'], test_stats['acc1'], test_stats['acc5']), flush=True)
         return
+
+    # Path to save model
+    output_dir = os.path.join("weights/", args.dataset, "finetune", args.model + '_patch{}'.format(model_cfg.vit_patch_size))
+    os.makedirs(output_dir, exist_ok=True)
+    args.output_dir = output_dir
 
     # ------------------------- Training Pipeline -------------------------
     start_time = time.time()
@@ -300,14 +323,10 @@ def main():
                         mixup_fn = mixup_fn,
                         )
 
-        # # LR scheduler
-        # if (epoch + 1) > args.wp_epoch:
-        #     lr_scheduler.step()
-
         # Evaluate
         if (epoch % args.eval_epoch) == 0 or (epoch + 1 == args.max_epoch):
-            test_stats = evaluate(val_dataloader, model, device, local_rank)
-            print_rank_0(f"Accuracy of the network on the {len(val_dataset)} test images: {test_stats['acc1']:.1f}%", local_rank)
+            test_stats = evaluate(valid_dataloader, model, device, local_rank)
+            print_rank_0(f"Accuracy of the network on the {len(valid_dataset)} test images: {test_stats['acc1']:.1f}%", local_rank)
             max_accuracy = max(max_accuracy, test_stats["acc1"])
             print_rank_0(f'Max accuracy: {max_accuracy:.2f}%', local_rank)
 
@@ -316,12 +335,12 @@ def main():
                 print('- saving the model after {} epochs ...'.format(epoch))
                 save_model(args = args,
                            epoch = epoch,
-                           model = model,
                            model_without_ddp = model_without_ddp,
                            optimizer = optimizer,
                            lr_scheduler = lr_scheduler,
                            loss_scaler = loss_scaler,
-                           metric = max_accuracy,
+                           metric = test_stats["acc1"],
+                           best_metric = max_accuracy,
                            )
         if args.distributed:
             dist.barrier()

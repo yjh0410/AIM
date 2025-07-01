@@ -17,16 +17,22 @@ from tokenizer import load_hf_tokenizer
 
 
 class ImageNet1KDataset(data.Dataset):
-    def __init__(self, args, is_train=False, transform=None):
+    def __init__(self,
+                 args,
+                 img_size: int = 256,
+                 patch_size: int = 16,
+                 is_train = False,
+                 max_length = 512,
+                 transform = None,
+                 ):
+        super().__init__()
         super().__init__()
         # ----------------- basic parameters -----------------
-        self.args = args
-        self.is_train = is_train
-        self.pixel_mean = [0.485, 0.456, 0.406]
-        self.pixel_std  = [0.229, 0.224, 0.225]
-        print(" - Pixel mean: {}".format(self.pixel_mean))
-        print(" - Pixel std:  {}".format(self.pixel_std))
-        self.num_patches = (args.img_size // args.patch_size) ** 2
+        self.is_train  = is_train
+        self.num_patches = (img_size // patch_size) ** 2
+        self.max_length = max_length
+
+        assert max_length > self.num_patches
 
         # load imagenet class names
         abso_path = os.path.dirname(os.path.abspath(__file__))
@@ -57,12 +63,19 @@ class ImageNet1KDataset(data.Dataset):
 
         # create a text
         text = "A photo of the {}.".format(self.classes[cls_idx])
-        token_ids = self.tokenizer.encode(text) + [self.tokenizer.eos_token_id]
-        token_mask = np.ones_like(token_ids, dtype=np.int8).tolist()
+        input_ids = self.tokenizer.encode(text) + [self.tokenizer.eos_token_id]
 
-        pad_token_id = self.tokenizer.pad_token_id
+        assert self.max_length >= self.num_patches + len(input_ids)
 
-        return image, token_ids, token_mask, prefix_mask, cls_idx, pad_token_id
+        # prepare attention mask
+        attention_mask = np.zeros(self.max_length, dtype=np.float32)
+        attention_mask[:self.num_patches + len(input_ids)] = 1.0
+        attention_mask = attention_mask.tolist()
+
+        # pad the input token ids
+        input_ids += [self.tokenizer.pad_token_id] * (self.max_length - self.num_patches - len(input_ids))
+
+        return image, input_ids, attention_mask, prefix_mask, cls_idx
     
     def pull_image(self, index):
         # laod data
@@ -70,7 +83,7 @@ class ImageNet1KDataset(data.Dataset):
 
         # denormalize image
         image = image.permute(1, 2, 0).numpy()
-        image = (image * self.pixel_std + self.pixel_mean) * 255.
+        image = image * 255.
         image = np.clip(image, 0., 255.).astype(np.uint8)
         image = image.copy()
 
@@ -86,8 +99,8 @@ class ImageNet1KDataset(data.Dataset):
                                           re_prob       = args.reprob,
                                           re_mode       = args.remode,
                                           re_count      = args.recount,
-                                          mean          = self.pixel_mean,
-                                          std           = self.pixel_std,
+                                          mean          = [0.0, 0.0, 0.0],
+                                          std           = [1.0, 1.0, 1.0],
                                           )
         else:
             t = []
@@ -101,7 +114,6 @@ class ImageNet1KDataset(data.Dataset):
             )
             t.append(T.CenterCrop(args.img_size))
             t.append(T.ToTensor())
-            t.append(T.Normalize(self.pixel_mean, self.pixel_std))
             transforms = T.Compose(t)
 
         return transforms
@@ -117,7 +129,7 @@ if __name__ == "__main__":
     # opt
     parser.add_argument('--root', default='D:/dataset/imagenet_1k/',
                         help='data root')
-    parser.add_argument('--img_size', default=224, type=int,
+    parser.add_argument('--img_size', default=256, type=int,
                         help='input image size.')
     parser.add_argument('--patch_size', default=16, type=int,
                         help='input image size.')
@@ -139,19 +151,25 @@ if __name__ == "__main__":
     args = parser.parse_args()
   
     # Dataset
-    dataset = ImageNet1KDataset(args, is_train=args.is_train)  
+    dataset = ImageNet1KDataset(
+        args=args,
+        img_size = 256,
+        patch_size = 16,
+        is_train = False,
+        max_length = 288,
+        )  
     print('Dataset size: ', len(dataset))
 
     for i in range(len(dataset)):
-        image, token_ids, token_mask, prefix_mask, cls_idx, pad_token_id = dataset[i]
-        text = dataset.tokenizer.decode(token_ids)
+        image, input_ids, attention_mask, prefix_mask, cls_idx = dataset[i]
+        text = dataset.tokenizer.decode(input_ids)
 
-        print(" - token ids: ", token_ids)
+        print(" - token ids: ", input_ids)
         print(" - decoded texts ids: ", text)
 
         # convert image tensor into image numpy
         image = image.permute(1, 2, 0).numpy()
-        image = (image * dataset.pixel_std + dataset.pixel_mean) * 255.
+        image = image * 255.
         image = np.clip(image, 0., 255.).astype(np.uint8)
         image = image.copy()
 

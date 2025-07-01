@@ -1,30 +1,19 @@
 import os
 import torch
 
-from .vit import build_vit
-from .aimv2 import build_aimv2
+from .vision_transformer import build_vision_transformer
+from .aimv2 import AIMv2
 from .vit_cls import ViTForImageClassification
 
 
-def build_model(args, model_type='default'):
+def build_model(args, model_cfg, model_type='default'):
     # ----------- Masked Image Modeling task -----------
     if model_type == 'aim':
-        print(" - Build AIM ViT model ... ")
-        return build_aimv2(
-            model_name    = args.model,
-            img_dim       = args.img_dim,
-            img_size      = args.img_size,
-            patch_size    = args.patch_size,
-            norm_pix_loss = args.norm_pix_loss,
-            )
+        print(" - Build AIMv2 model ... ")
+        return AIMv2(model_cfg)
    
     # ----------- Vision Transformer -----------
-    model = build_vit(
-            model_name    = args.model,
-            img_dim       = args.img_dim,
-            img_size      = args.img_size,
-            patch_size    = args.patch_size,
-            )
+    model = build_vision_transformer(model_cfg)
     load_pretrained(model, args.pretrained)
 
     if model_type == 'cls':

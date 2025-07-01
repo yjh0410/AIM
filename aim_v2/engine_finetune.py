@@ -32,28 +32,30 @@ def train_one_epoch(args,
 
     # train one epoch
     for iter_i, samples in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
-        ni = iter_i + epoch * epoch_size
+        global_steps = iter_i + epoch * epoch_size
         nw = lr_scheduler_warmup.wp_iter
         
         # Warmup
-        if nw > 0 and ni < nw:
-            lr_scheduler_warmup(ni, optimizer)
-        elif ni == nw:
+        if nw > 0 and global_steps < nw:
+            lr_scheduler_warmup(global_steps, optimizer)
+        elif global_steps == nw:
             print("Warmup stage is over.")
             lr_scheduler_warmup.set_lr(optimizer, args.base_lr)
 
         # To device
-        images = samples[0].to(device, non_blocking=True)
-        targets = samples[-1].to(device, non_blocking=True).long()
+        images = samples["images"].to(device, non_blocking=True)
+        targets = samples["cls_idxs"].to(device, non_blocking=True).long()
 
         # Mixup
         if mixup_fn is not None:
             images, targets = mixup_fn(images, targets)
 
         # Inference
-        with torch.cuda.amp.autocast():
+        with torch.autocast(device_type=device.type, dtype=torch.float16):
             output = model(images)
             loss = criterion(output, targets)
+
+            loss /= args.update_freq
 
         # Check loss
         loss_value = loss.item()
@@ -62,13 +64,10 @@ def train_one_epoch(args,
             sys.exit(1)
 
         # Backward & Optimize
-        loss_scaler(loss = loss,
-                    optimizer = optimizer,
-                    clip_grad = args.max_grad_norm, 
-                    parameters = model.parameters(),
-                    create_graph = False,
-                    )
-        optimizer.zero_grad()
+        update_grad = (global_steps % args.update_freq == 0)
+        loss_scaler(loss, optimizer, parameters=model.parameters(), update_grad=update_grad)
+        if update_grad:
+            optimizer.zero_grad()
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -88,7 +87,7 @@ def train_one_epoch(args,
             tblogger.add_scalar('lr', lr, epoch_1000x)
 
         # perform per iteration lr schedule
-        if ni > nw:
+        if global_steps > nw:
             lr_scheduler.step()
 
     # gather the stats from all processes
@@ -109,17 +108,15 @@ def evaluate(data_loader, model, device, local_rank):
     model.eval()
 
     for samples in metric_logger.log_every(data_loader, 10, header):
-        images = samples[0]
-        target = samples[-1]
-        images = images.to(device, non_blocking=True)
-        target = target.to(device, non_blocking=True)
-
+        images = samples["images"].to(device, non_blocking=True)
+        targets = samples["cls_idxs"].to(device, non_blocking=True).long()
+        
         # compute output
-        with torch.cuda.amp.autocast():
+        with torch.autocast(device_type=device.type, dtype=torch.float16):
             output = model(images)
-            loss = criterion(output, target)
+            loss = criterion(output, targets)
 
-        acc1, acc5 = accuracy(output, target, topk=(1, 5))
+        acc1, acc5 = accuracy(output, targets, topk=(1, 5))
 
         batch_size = images.shape[0]
         metric_logger.update(loss=loss.item())

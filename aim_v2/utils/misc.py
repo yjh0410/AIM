@@ -1,3 +1,4 @@
+import os
 import math
 import time
 import numpy as np
@@ -204,42 +205,42 @@ class MetricLogger(object):
 
 class CollateFunc(object):
     def __call__(self, batch):
-        images       = []
-        token_ids    = []
-        token_masks  = []
-        prefix_masks = []
-        cls_idxs     = []
+        images = []
+        image_prefix_masks = []
+        input_ids = []
+        attention_masks = []
+        cls_idxs = []
 
         # Collect batch data
         for sample in batch:
-            image        = sample[0]
-            token_id     = sample[1]
-            token_mask   = sample[2]
-            prefix_mask  = sample[3]
-            cls_idx      = sample[4]
-            pad_token_id = sample[5]
+            image = sample[0]
+            input_id = sample[1]
+            attention_mask = sample[2]
+            image_prefix_mask = sample[3]
+            cls_idx = sample[4]
 
             images.append(image)
-            token_ids.append(token_id)
-            token_masks.append(token_mask)
-            prefix_masks.append(prefix_mask)
+            input_ids.append(input_id)
+            attention_masks.append(attention_mask)
+            image_prefix_masks.append(image_prefix_mask)
             cls_idxs.append(cls_idx)
 
         # Handling unequal token lengths
-        bs = len(batch)
-        max_seq_len = max([len(seq) for seq in token_ids])
-        pad_token_ids = torch.ones([bs, max_seq_len], dtype=torch.long) * pad_token_id
-        pad_token_masks = torch.zeros([bs, max_seq_len], dtype=torch.bool)
-        for bi in range(bs):
-            seq_len = len(token_ids[bi])
-            pad_token_ids[bi, :seq_len] = torch.as_tensor(token_ids[bi]).long()
-            pad_token_masks[bi, :seq_len] = torch.as_tensor(token_masks[bi]).bool()
+        images = torch.stack(images, dim=0)                          # [bs, 3, h, w]
+        image_prefix_masks = torch.stack(image_prefix_masks, dim=0)  # [bs, img_seq_len]
+        input_ids = torch.as_tensor(input_ids)                       # [bs, txt_seq_len]
+        attention_masks = torch.as_tensor(attention_masks)           # [bs, max_length], max_length >= img_seq_len + txt_seq_len
+        cls_idxs = torch.as_tensor(cls_idxs)                         # [bs,]
 
-        images = torch.stack(images, dim=0)              # [bs, 3, h, w]
-        cls_idxs = torch.as_tensor(cls_idxs)             # [bs,]
-        prefix_masks = torch.stack(prefix_masks, dim=0)  # [bs, img_seq_len]
+        data_item = {
+            "images": images,
+            "image_prefix_masks": image_prefix_masks,
+            "input_ids": input_ids,
+            "attention_masks": attention_masks,
+            "cls_idxs": cls_idxs,
+        }
         
-        return images, prefix_masks, pad_token_ids, pad_token_masks, cls_idxs
+        return data_item
 
 
 # ---------------------- Optimize functions ----------------------
@@ -261,7 +262,7 @@ class NativeScalerWithGradNormCount:
     state_dict_key = "amp_scaler"
 
     def __init__(self):
-        self._scaler = torch.cuda.amp.GradScaler()
+        self._scaler = torch.GradScaler()
 
     def __call__(self, loss, optimizer, clip_grad=None, parameters=None, create_graph=False, update_grad=True):
         self._scaler.scale(loss).backward()
@@ -362,26 +363,40 @@ def load_model(args, model_without_ddp, optimizer, lr_scheduler, loss_scaler):
             print('- Load lr scheduler from the checkpoint: ', args.resume)
             lr_scheduler.load_state_dict(checkpoint.pop("lr_scheduler"))
 
-def save_model(args, epoch, model, model_without_ddp, optimizer, lr_scheduler, loss_scaler, metric=None):
-    output_dir = Path(args.output_dir)
-    epoch_name = str(epoch)
-    if loss_scaler is not None:
-        if metric is not None:
-            checkpoint_paths = [output_dir / ('checkpoint-{}-metric-{:.4f}.pth'.format(epoch_name, metric))]
-        else:
-            checkpoint_paths = [output_dir / ('checkpoint-{}.pth'.format(epoch_name))]
-        for checkpoint_path in checkpoint_paths:
-            to_save = {
-                'model': model_without_ddp.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'lr_scheduler': lr_scheduler.state_dict(),
-                'epoch': epoch,
-                'scaler': loss_scaler.state_dict(),
-                'args': args,
-                'pretrained_encoder': model_without_ddp.encoder.state_dict(),
-            }
+def save_model(args, epoch, model_without_ddp, optimizer, lr_scheduler, loss_scaler, metric=None, best_metric=None):
+    print(" => Save the checkpoint at epoch-{}".format(epoch))
+    checkpoint_path = os.path.join(args.output_dir, 'checkpoint-{}.pth'.format(epoch))
+    to_save = {
+        'model': model_without_ddp.state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'lr_scheduler': lr_scheduler.state_dict(),
+        'epoch': epoch,
+        'scaler': loss_scaler.state_dict(),
+        'args': args,
+        'pretrained_encoder': model_without_ddp.vis_encoder.state_dict(),
+    }
+    torch.save(to_save, checkpoint_path)
 
-            torch.save(to_save, checkpoint_path)
-    else:
-        client_state = {'epoch': epoch}
-        model.save_checkpoint(save_dir=args.output_dir, tag="checkpoint-%s" % epoch_name, client_state=client_state)
+    # save the best checkpoint
+    if metric is not None and metric >= best_metric:
+        print(" => Save the best checkpoint at epoch-{}".format(epoch))
+        best_checkpoint_path = os.path.join(args.output_dir, 'checkpoint-best.pth')
+        to_save = {
+            'model': model_without_ddp.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'lr_scheduler': lr_scheduler.state_dict(),
+            'epoch': epoch,
+            'scaler': loss_scaler.state_dict(),
+            'args': args,
+            'pretrained_encoder': model_without_ddp.vis_encoder.state_dict(),
+        }
+        torch.save(to_save, best_checkpoint_path)
+
+    # Delete old checkpoints
+    save_ckpt_num = 3
+    save_ckpt_freq = args.eval_epoch
+
+    to_del = epoch - save_ckpt_num * save_ckpt_freq
+    old_ckpt = os.path.join(args.output_dir, 'checkpoint-{}.pth'.format(to_del))
+    if os.path.exists(old_ckpt):
+        os.remove(old_ckpt)
