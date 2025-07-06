@@ -119,13 +119,14 @@ class AIMv2(nn.Module):
                      attention_mask = None,
                      ):
         loss_vis = self.compute_vis_loss(input_imgs, pred_imgs, img_prefix_mask)
-        loss_txt = self.compute_txt_loss(input_ids, pred_logits, attention_mask[:, pred_imgs.shape[1]:])
+        loss_txt, token_acc = self.compute_txt_loss(input_ids, pred_logits, attention_mask[:, pred_imgs.shape[1]:])
 
         λ = 1.0
         loss_dict = {}
         loss_dict["loss"] = loss_vis + λ * loss_txt
         loss_dict["loss_vis"] = loss_vis
         loss_dict["loss_txt"] = loss_txt
+        loss_dict["token_acc"] = token_acc
 
         return loss_dict
 
@@ -170,18 +171,25 @@ class AIMv2(nn.Module):
                 loss: torch.Tensor
         """
         # cross-entropy
-        pred_logits = pred_logits[:, :-1, :].flatten(0, 1)
-        input_ids = input_ids[:, 1:].flatten()
+        pred_logits = pred_logits[:, :-1, :].flatten(0, 1)   # [bs * seq_len, nv]
+        input_ids = input_ids[:, 1:].flatten()               # [bs * seq_len,]
         loss = F.cross_entropy(pred_logits, input_ids, reduction="none")
         
         # keep the loss of non-padding tokens and normalize the loss.
         if attention_mask is not None:
-            masks_flatten = attention_mask[:, 1:].flatten()
+            masks_flatten = attention_mask[:, 1:].flatten()  # [bs * seq_len,]
             loss = (loss * masks_flatten).sum() / masks_flatten.sum()
         else:
             loss = loss.mean()
 
-        return loss
+        # token accuracy
+        masks_flatten_ = masks_flatten + (1.0 - masks_flatten) * -1e6
+        pred_ids = torch.argmax(pred_logits * masks_flatten_.unsqueeze(1), dim=1)  # [bs * seq_len,]
+        is_correct = (pred_ids == input_ids) * masks_flatten
+
+        token_acc = sum(is_correct) / sum(masks_flatten)
+
+        return loss, token_acc
 
 
 if __name__ == '__main__':
